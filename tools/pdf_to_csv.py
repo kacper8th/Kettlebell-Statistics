@@ -38,6 +38,7 @@ SECTIONS = {
     # układ 2024 (Puchar Polski)
     "WYNIKI SEE-SAW": "SSP",
     "WYNIKI SQUAT": "2KBSQ",
+    "WYNIKI PISTOL": "Pistol",
     # wspólne
     "WYNIKI PISTOL SQUAT": "Pistol",
     "WYNIKI PULL-UP": "Pull-Up",
