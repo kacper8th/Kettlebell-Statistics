@@ -63,6 +63,7 @@ const B_OFICJALNE_START = [
   ['Pistol',    0.60, 0.67],
   ['Pull-Up',   0.60, 0.67],
   ["Snatch 2'", 0.40, 0.40],
+  ["Snatch 5'", 0.40, 0.40],
   ["Snatch 6'", 0.40, 0.40],
 ];
 

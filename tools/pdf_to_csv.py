@@ -35,6 +35,9 @@ SECTIONS = {
     "WYNIKI TGU": "TGU",
     "WYNIKI SEE SAW PRESS": "SSP",
     "WYNIKI 2KB SQUAT": "2KBSQ",
+    # układ 2024 (Puchar Polski)
+    "WYNIKI SEE-SAW": "SSP",
+    "WYNIKI SQUAT": "2KBSQ",
     # wspólne
     "WYNIKI PISTOL SQUAT": "Pistol",
     "WYNIKI PULL-UP": "Pull-Up",
@@ -51,6 +54,7 @@ def normalize_category(name):
     n = re.sub(r"\s+", " ", name.strip().upper())
     n = re.sub(r"(\d)\s*KG\b", r"\1 KG", n)            # '85KG' → '85 KG'
     n = re.sub(r"\bKOBIETY\b", "KOBIET", n)
+    n = re.sub(r"\bMĘŻCZYŹNI\b", "MĘŻCZYZN", n)
     n = re.sub(r"\bPOWYŻEJ\s+(\d)", r"+\1", n)
     n = re.sub(r"\bDO\s+(\d)", r"\1", n)
     return n
@@ -157,6 +161,141 @@ def fmt_num(x):
     return str(int(x)) if float(x) == int(x) else ("%g" % x).replace(".", ",")
 
 
+def fmt_bw(bw):
+    """BW% do CSV: do 3 miejsc po przecinku, bez zbędnych zer (56,5% / 55,227% / 100,0%)."""
+    v = ("%.3f" % (bw * 100)).rstrip("0")
+    if v.endswith("."):
+        v += "0"
+    return v.replace(".", ",") + "%"
+
+
+# ---------------------------------------------------------------- układ 2024 (Puchar Polski)
+# Kolumny: M-SC | NAZWISKO | IMIĘ | KLUB | WAGA [kg] | PRÓBA 1–3 | MAX | BW [%]
+# SSP i przysiad: próby jako „16.0/16.0” (dwa odważniki), MAX = suma.
+# Snatch: M-SC | NAZWISKO | IMIĘ | KLUB | WAGA | WAGA ODWAŻNIKA | ILOŚĆ POWTÓRZEŃ | TONAŻ — bez %BW, waga bywa pusta.
+
+NUM24 = re.compile(r"^\d+(?:[.,]\d+)?(?:/\d+(?:[.,]\d+)?)?$")
+
+
+def is_layout_2024(text):
+    return bool(re.search(r"KATEGORIA:", text)) and "M-SC" in text
+
+
+def name_case(s):
+    return s.title() if s.isupper() else s
+
+
+def parse_2024(text):
+    rows = []
+    boj = None
+    lines = text.splitlines()
+    for i, raw in enumerate(lines):
+        line = raw.strip()
+        hit = next((v for k, v in SECTIONS.items() if line.startswith(k)), None)
+        if hit:
+            boj = hit
+            continue
+        if line.startswith("WYNIKI"):
+            boj = None
+            continue
+        if boj is None:
+            continue
+        m = re.match(r"^(\s*)(\d+)(\s+)(.*)$", raw)
+        if not m:
+            continue
+        # liczby z końca wiersza (po dowolnych odstępach), reszta = nazwisko | imię | klub (rozdzielone 2+ spacjami)
+        rest = m.group(4).rstrip()
+        nums = []
+        while True:
+            t = re.search(r"(?:^|\s)(\S+)$", rest)
+            if not t or not NUM24.match(t.group(1)):
+                break
+            nums.insert(0, t.group(1))
+            rest = rest[:t.start()].rstrip()
+        fields = [x for x in re.split(r"\s{2,}", rest.strip()) if x]
+        if not fields:
+            continue
+        name_col = m.end(3)                          # kolumna, w której zaczyna się pierwsze pole tekstowe
+        if len(m.group(3)) > 12:
+            # nazwisko złamane: fragmenty w liniach nad i pod wierszem (wcięte mniej niż imię)
+            def frag(j):
+                if 0 <= j < len(lines):
+                    l = lines[j]
+                    if l.strip() and not re.search(r"\d", l) and (len(l) - len(l.lstrip())) < name_col:
+                        return l.strip()
+                return ""
+            nazwisko = join_name(frag(i - 1), frag(i + 1)).strip() if frag(i - 1) and frag(i + 1) \
+                else (frag(i - 1) or frag(i + 1))
+            fields = [nazwisko] + fields
+        if len(fields) < 2:
+            continue
+        nazwisko, imie = name_case(fields[0]), name_case(fields[1])
+        f = [to_num(x) if "/" not in x else None for x in nums]
+        rec = dict(boj=boj, imie=imie, nazwisko=nazwisko, fields=fields)
+        if boj == "Snatch":
+            if len(nums) == 4:
+                waga, odw, powt, tonaz = f
+            elif len(nums) == 3:
+                waga = None
+                odw, powt, tonaz = f
+            else:
+                continue
+            rec.update(wynik=tonaz, waga=waga, odwaznik=odw, powt=powt, bw=None)
+        else:
+            if len(nums) == 6:
+                waga, _p1, _p2, _p3, mx, bwp = f
+            elif len(nums) == 5:
+                waga = None
+                _p1, _p2, _p3, mx, bwp = f
+            else:
+                continue
+            rec.update(wynik=mx, waga=waga, odwaznik=None, powt=None, bw=(bwp / 100 if bwp else None))
+        rows.append(rec)
+
+    # nazwisko i imię zlane w jedno pole („Laskowska-Bednarczyk Katarzyna”) — rozdziel wg par z innych wierszy
+    pairs = {(r["nazwisko"], r["imie"]) for r in rows if " " not in r["fields"][0]}
+    for r in rows:
+        first = r["fields"][0]
+        if " " in first:
+            parts = first.split()
+            for k in range(1, len(parts)):
+                a, b = name_case(" ".join(parts[:k])), name_case(" ".join(parts[k:]))
+                if (a, b) in pairs:
+                    r["nazwisko"], r["imie"] = a, b
+                    break
+
+    # waga zawodnika z innych bojów, gdy w wierszu jej brak (klucz: nazwisko + imię, potem samo nazwisko)
+    def key(r):
+        return (r["nazwisko"].lower(), r["imie"].lower())
+    known = {}
+    by_surname = {}
+    for r in rows:
+        if r["waga"]:
+            known.setdefault(key(r), r["waga"])
+            by_surname.setdefault(r["nazwisko"].lower(), set()).add(r["waga"])
+    notes = []
+    for r in rows:
+        if not r["waga"]:
+            w = known.get(key(r))
+            if w is None and len(by_surname.get(r["nazwisko"].lower(), ())) == 1:
+                w = next(iter(by_surname[r["nazwisko"].lower()]))
+            if w is not None:
+                r["waga"] = w
+                notes.append(f"{r['imie']} {r['nazwisko']} ({r['boj']}): waga {w} z innego boju")
+        if r["waga"]:
+            base = r["odwaznik"] if r["boj"] == "Snatch" else r["wynik"]
+            r["bw"] = (base / r["waga"]) if r["boj"] != "Pull-Up" else (r["waga"] + r["wynik"]) / r["waga"]
+        elif r["wynik"] > 0 and r["bw"] is None:
+            notes.append(f"{r['imie']} {r['nazwisko']} ({r['boj']}): BRAK WAGI — wiersz pominięty")
+    return rows, notes
+
+
+def final_count_2024(text):
+    head = re.split(r"WYNIKI (?!KOŃCOWE)", text)[0]
+    # waga, 4 miejsca w bojach, punkty, [uwagi], miejsce — nazwisko bywa złamane do sąsiedniej linii
+    return len(re.findall(r"\s\d+(?:\.\d+)?(?:\s+\d+){5}\b.*?\s\d+\s*$", head, re.M))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("pdf", help="plik PDF z wynikami (albo .txt z pdftotext -layout)")
@@ -172,7 +311,7 @@ def main():
     else:
         text = src.read_text(encoding="utf-8")
 
-    m = re.search(r"Kategoria:\s*(.+)", text)
+    m = re.search(r"Kategoria:\s*(.+)", text, re.I)
     if not m:
         sys.exit("Nie znaleziono 'Kategoria:' w PDF.")
     kategoria = normalize_category(m.group(1))
@@ -183,12 +322,18 @@ def main():
     else:
         sys.exit(f"Nie rozpoznano płci z kategorii: {kategoria}")
 
-    all_rows = parse_sections(text)
-    rows = [r for r in all_rows if r["wynik"] > 0]
+    warnings = []
+    if is_layout_2024(text):
+        all_rows, notes = parse_2024(text)
+        warnings += notes
+        rows = [r for r in all_rows if r["wynik"] > 0 and r["bw"]]
+        n_final = final_count_2024(text)
+    else:
+        all_rows = parse_sections(text)
+        rows = [r for r in all_rows if r["wynik"] > 0]
+        n_final = final_count(text)
 
     athletes = Counter((r["imie"], r["nazwisko"]) for r in all_rows)
-    n_final = final_count(text)
-    warnings = []
     if n_final and n_final != len(athletes):
         warnings.append(f"klasyfikacja końcowa: {n_final} zawodników, w bojach: {len(athletes)}")
     for s in unknown_sections(text):
@@ -203,7 +348,7 @@ def main():
     lines = [";".join(HEADER)]
     for r in rows:
         boj = args.snatch if r["boj"] == "Snatch" else r["boj"]
-        bw = ("%.1f%%" % round(r["bw"] * 100, 1)).replace(".", ",")
+        bw = fmt_bw(r["bw"])
         lines.append(";".join([args.zawody, kategoria, boj, plec, r["imie"], r["nazwisko"],
                                fmt_num(r["wynik"]), bw, fmt_num(r["odwaznik"]), fmt_num(r["powt"])]))
     with open(out, "w", encoding="utf-8-sig", newline="\r\n") as f:
