@@ -10,9 +10,11 @@ Wymaga: Python 3.8+, program `pdftotext` (poppler-utils) w PATH.
 Zamiast PDF można podać gotowy tekst z `pdftotext -layout` (plik .txt).
 
 Zasady (patrz Obsidian: Kettlebell Statystyki / Instrukcja dla AI → „Procedura: PDF → CSV”):
-- kategoria i płeć z tytułu PDF („Kategoria: PRO MĘŻCZYZN +85 KG” → M), nazwa kategorii dokładnie jak w PDF
+- kategoria i płeć z tytułu PDF („Kategoria: PRO MĘŻCZYZN +85 KG” → M); nazwa ujednolicona do formatu 2026
+  (KOBIETY → KOBIET, „DO 65 KG” → „65 KG”, „POWYŻEJ 65 KG” → „+65 KG”)
 - boje: TGU, SSP, 2KBSQ, Pistol, Pull-Up, Snatch (Snatch dostaje nazwę z --snatch, np. "Snatch 2'")
 - Wynik: boje siłowe = Max próba (Pull-Up = obciążenie dodatkowe); Snatch = Total (tonaż)
+- Pull-Up: BW% zawsze jako (waga + obciążenie) / waga (PDF 2025 podaje obciążenie / waga — przeliczane +100%)
 - wyniki 0 są pomijane
 - nazwiska w pisowni tytułowej; nazwiska łamane na dwie linie są sklejane (z myślnikiem bez spacji)
 - kontrola strukturalna: liczba zawodników = liczba wierszy klasyfikacji końcowej
@@ -25,15 +27,33 @@ from collections import Counter
 from pathlib import Path
 
 SECTIONS = {
+    # układ 2026
     "WYNIKI TURKISH GET-UP": "TGU",
     "WYNIKI SEE-SAW PRESS": "SSP",
     "WYNIKI KETTLEBELL SQUAT": "2KBSQ",
+    # układ 2025
+    "WYNIKI TGU": "TGU",
+    "WYNIKI SEE SAW PRESS": "SSP",
+    "WYNIKI 2KB SQUAT": "2KBSQ",
+    # wspólne
     "WYNIKI PISTOL SQUAT": "Pistol",
     "WYNIKI PULL-UP": "Pull-Up",
+    "WYNIKI PULL UP": "Pull-Up",            # układ 2025
     "WYNIKI SNATCH": "Snatch",
 }
-NUM = r"-?\d+(?:,\d+)?%?"
+NUM = r"-?\d+(?:[.,]\d+)?%?"      # przecinek albo kropka dziesiętna (2025: 106.1%)
 HEADER = ["Zawody", "Kategoria", "Bój", "Płeć", "Imię", "Nazwisko", "Wynik", "BW%", "Odważnik", "Powtórzenia"]
+
+
+def normalize_category(name):
+    """Jednolite nazwy kategorii między latami (format z 2026):
+    'AMATOR KOBIETY DO 65 KG' → 'AMATOR KOBIET 65 KG', 'AMATOR MĘŻCZYZN POWYŻEJ 85 KG' → 'AMATOR MĘŻCZYZN +85 KG'."""
+    n = re.sub(r"\s+", " ", name.strip().upper())
+    n = re.sub(r"(\d)\s*KG\b", r"\1 KG", n)            # '85KG' → '85 KG'
+    n = re.sub(r"\bKOBIETY\b", "KOBIET", n)
+    n = re.sub(r"\bPOWYŻEJ\s+(\d)", r"+\1", n)
+    n = re.sub(r"\bDO\s+(\d)", r"\1", n)
+    return n
 
 
 def to_num(tok):
@@ -52,6 +72,23 @@ def split_name(full):
     return parts[0], " ".join(parts[1:]).title()
 
 
+def split_trailing_numbers(line):
+    """Oddziela liczby z końca wiersza od nazwiska.
+    W PDF 2025 nieudana próba bywa zapisana jako „-” (np. „35 - 37”), a wynik 0 ma %BW „-” albo punkty „N/A”:
+    „-” i „N/A” liczymy jako 0, ale tylko gdy daje to pełny wiersz (7 liczb) — inaczej ścisłe dopasowanie."""
+    toks = line.split()
+    loose = toks[:]
+    nums = []
+    while loose and (re.fullmatch(NUM, loose[-1]) or loose[-1] in ("-", "N/A")):
+        nums.insert(0, loose.pop())
+    if len(nums) == 7:
+        return loose, ["0" if n in ("-", "N/A") else n for n in nums]
+    nums = []
+    while toks and re.fullmatch(NUM, toks[-1]):
+        nums.insert(0, toks.pop())
+    return toks, nums
+
+
 def make_row(boj, name, nums):
     imie, nazwisko = split_name(name)
     if boj == "Snatch":
@@ -59,12 +96,16 @@ def make_row(boj, name, nums):
         return dict(boj=boj, imie=imie, nazwisko=nazwisko, wynik=to_num(total),
                     bw=to_num(bw) / 100, odwaznik=to_num(kb), powt=to_num(reps))
     _p1, _p2, _p3, _miejsce, mx, bw, _pkt = nums
+    bw = to_num(bw) / 100
+    if boj == "Pull-Up" and 0 < bw < 1:
+        # PDF 2025: %BW = obciążenie / waga; ujednolicamy do konwencji 2026: (waga + obciążenie) / waga
+        bw = round(bw + 1, 4)
     return dict(boj=boj, imie=imie, nazwisko=nazwisko, wynik=to_num(mx),
-                bw=to_num(bw) / 100, odwaznik=None, powt=None)
+                bw=bw, odwaznik=None, powt=None)
 
 
 def parse_sections(text):
-    """Wiersze ze wszystkich sekcji bojów. Wiersze z %BW = '-' (wynik 0) nie pasują do wzorca i są pomijane."""
+    """Wiersze ze wszystkich sekcji bojów (także z wynikiem 0 — odfiltrowywane później)."""
     rows = []
     boj = None
     pending_name = pending_nums = None
@@ -82,10 +123,7 @@ def parse_sections(text):
             continue
         if boj is None or line.startswith("Zawodnik") or line.startswith("ia "):
             continue
-        toks = line.split()
-        nums = []
-        while toks and re.fullmatch(NUM, toks[-1]):
-            nums.insert(0, toks.pop())
+        toks, nums = split_trailing_numbers(line)
         name = " ".join(toks)
         if len(nums) == 7 and name:
             rows.append(make_row(boj, name, nums))
@@ -108,8 +146,9 @@ def unknown_sections(text):
 
 
 def final_count(text):
-    head = re.split(r"WYNIKI (?:TURKISH|SEE-SAW|KETTLEBELL|PISTOL|PULL-UP|SNATCH)", text)[0]
-    return len(re.findall(r"(?:\s+\d+){4,6}\s+\d+,\d+\s+\d+\s*$", head, re.M))
+    head = re.split(r"WYNIKI (?!KOŃCOWE)", text)[0]
+    # wiersz klasyfikacji: miejsca w bojach [, tiebreak], punkty (x,xxx / x.xxx), miejsce
+    return len(re.findall(r"(?:\s+-?\d+(?:[.,]\d+)?){4,7}\s+\d+[.,]\d{3}\s+\d+\s*$", head, re.M))
 
 
 def fmt_num(x):
@@ -136,7 +175,7 @@ def main():
     m = re.search(r"Kategoria:\s*(.+)", text)
     if not m:
         sys.exit("Nie znaleziono 'Kategoria:' w PDF.")
-    kategoria = m.group(1).strip()
+    kategoria = normalize_category(m.group(1))
     if re.search(r"MĘŻCZ|MEZCZ", kategoria, re.I):
         plec = "M"
     elif re.search(r"KOBIET", kategoria, re.I):
