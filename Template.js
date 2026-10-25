@@ -32,8 +32,8 @@ const DANE_COLUMNS = [
   { name: 'Płeć',        width: 50  },
   { name: 'Imię',        width: 110 },
   { name: 'Nazwisko',    width: 170 },
-  { name: 'Wynik',       width: 80,  note: 'TGU / SSP / 2KBSQ: najlepsze udane podejście (kg).\nSnatch: tonaż = powtórzenia × odważnik.\n0 = brak zaliczonego podejścia (wykluczane z analizy).' },
-  { name: 'BW%',         width: 70,  note: 'Z PDF. Wpisuj jako procent (56,5%) albo ułamek (0,565).\nSnatch: w PDF to odważnik / waga zawodnika.', format: '0.0%' },
+  { name: 'Wynik',       width: 80,  note: 'TGU / SSP / 2KBSQ / Pistol: najlepsze udane podejście (kg).\nPull-Up: obciążenie dodatkowe (kg) — w punktacji ciężar = waga zawodnika + obciążenie.\nSnatch: tonaż = powtórzenia × odważnik.\n0 = brak zaliczonego podejścia (wykluczane z analizy).' },
+  { name: 'BW%',         width: 70,  note: 'Z PDF. Wpisuj jako procent (56,5%) albo ułamek (0,565).\nSnatch: w PDF to odważnik / waga zawodnika.\nPull-Up: w PDF to (waga + obciążenie) / waga, czyli > 100%.', format: '0.0%' },
   { name: 'Odważnik',    width: 90,  note: 'Tylko Snatch — waga odważnika (kg).' },
   { name: 'Powtórzenia', width: 100, note: 'Tylko Snatch — liczba powtórzeń.' },
 ];
@@ -53,11 +53,15 @@ const WSZYSTKIE = 'WSZYSTKIE';
 /**
  * Współczynniki oficjalne — wartości startowe (podane przez organizatora).
  * Odmiany Snatcha (2', 6') to osobne boje — nie łączymy ich w analizie.
+ * Pistol i Pull-Up — boje kategorii PRO. Pull-Up: Wynik w Danych = obciążenie dodatkowe,
+ * a ciężar w punktacji = waga zawodnika + obciążenie.
  */
 const B_OFICJALNE_START = [
   ['TGU',       0.60, 0.67],
   ['SSP',       0.60, 0.67],
   ['2KBSQ',     0.60, 0.67],
+  ['Pistol',    0.60, 0.67],
+  ['Pull-Up',   0.60, 0.67],
   ["Snatch 2'", 0.40, 0.40],
   ["Snatch 6'", 0.40, 0.40],
 ];

@@ -10,7 +10,7 @@ wynik = ciężar / waga_zawodnika ^ b
 
 - `b = 0` — siła absolutna (sam ciężar / tonaż)
 - `b = 1` — siła względna (%BW)
-- `b` oficjalny — współczynnik używany na zawodach (TGU/SSP/2KBSQ: K 0,60, M 0,67; Snatch: 0,40)
+- `b` oficjalny — współczynnik używany na zawodach (boje siłowe: K 0,60, M 0,67; Snatch: 0,40)
 
 ## Struktura
 
@@ -19,9 +19,12 @@ wynik = ciężar / waga_zawodnika ^ b
 | `appsscript.json` | manifest projektu (strefa czasowa Europe/Warsaw) |
 | `.clasp.json` | powiązanie z projektem Apps Script |
 | `Template.js` | menu **⚙️ Setup → Inicjalizacja** — buduje strukturę arkusza (bezpieczne do wielokrotnego uruchamiania) |
-| `Code.js` | logika projektu |
+| `Code.js` | logika projektu — import CSV |
+| `Import.html` | okienko importu CSV (menu **📥 Dane → Importuj CSV**) |
 
-Nowy, pusty arkusz konfiguruje się jednym kliknięciem: **⚙️ Setup → Inicjalizacja**.
+Nowy, pusty arkusz konfiguruje się jednym kliknięciem: **⚙️ Setup → Inicjalizacja**. Dane wczytuje się z plików CSV przez **📥 Dane → Importuj CSV**.
+
+Boje: TGU, SSP, 2KBSQ, Pistol, Pull-Up, Snatch 2', Snatch 6'.
 
 ## Praca z kodem
 
