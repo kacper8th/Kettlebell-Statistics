@@ -21,6 +21,13 @@ wynik = ciężar / waga_zawodnika ^ b
 | `Template.js` | menu **⚙️ Setup → Inicjalizacja** — buduje strukturę arkusza (bezpieczne do wielokrotnego uruchamiania) |
 | `Code.js` | logika projektu — import CSV |
 | `Import.html` | okienko importu CSV (menu **📥 Dane → Importuj CSV**) |
+| `tools/pdf_to_csv.py` | PDF z wynikami → CSV do importu (Python + `pdftotext`; clasp go nie wysyła) |
+
+PDF → CSV:
+
+```
+python tools/pdf_to_csv.py wyniki.pdf --zawody "MP 2026 Bochnia" --snatch "Snatch 2'"
+```
 
 Nowy, pusty arkusz konfiguruje się jednym kliknięciem: **⚙️ Setup → Inicjalizacja**. Dane wczytuje się z plików CSV przez **📥 Dane → Importuj CSV**.
 
