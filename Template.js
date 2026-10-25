@@ -36,10 +36,11 @@ const DANE_COLUMNS = [
   { name: 'BW%',         width: 70,  note: 'Z PDF. Wpisuj jako procent (56,5%) albo ułamek (0,565).\nSnatch: w PDF to odważnik / waga zawodnika.\nPull-Up: w PDF to (waga + obciążenie) / waga, czyli > 100%.', format: '0.0%' },
   { name: 'Odważnik',    width: 90,  note: 'Tylko Snatch — waga odważnika (kg).' },
   { name: 'Powtórzenia', width: 100, note: 'Tylko Snatch — liczba powtórzeń.' },
+  { name: 'Waga',        width: 70,  note: 'Waga zawodnika (kg).\nPusta → 📥 Dane → Policz wagi (z BW% tego wiersza). Po imporcie CSV liczona automatycznie.\nWpisanej wagi skrypt nie zmienia.', format: '0.00', optional: true },
 ];
 
 /** Numery kolumn w Danych (1 = A). */
-const D = { zawody: 1, kategoria: 2, boj: 3, plec: 4, imie: 5, nazwisko: 6, wynik: 7, bw: 8, odwaznik: 9, powt: 10 };
+const D = { zawody: 1, kategoria: 2, boj: 3, plec: 4, imie: 5, nazwisko: 6, wynik: 7, bw: 8, odwaznik: 9, powt: 10, waga: 11 };
 
 const PLCIE = ['K', 'M'];
 
@@ -126,6 +127,7 @@ function onOpen() {
     .addToUi();
   ui.createMenu('📥 Dane')
     .addItem('Importuj CSV', 'showImportDialog')
+    .addItem('Policz wagi', 'computeWeights')
     .addToUi();
 }
 
@@ -136,13 +138,15 @@ function setupTemplate() {
 
   if (ensureUstawienia_(ss)) created.push(SHEET_USTAWIENIA);
   if (ensureDane_(ss)) created.push(SHEET_DANE);
+  const addedCols = ensureDaneHeaders_(ss);
   applyDaneRules_(ss);
   removeDefaultSheet_(ss);
   orderSheets_(ss);
 
-  const msg = (created.length ? 'Utworzono: ' + created.join(', ') : 'Zakładki już istnieją — dane bez zmian.')
+  const msg = (created.length ? 'Utworzono: ' + created.join(', ') + '.' : 'Zakładki już istnieją — dane bez zmian.')
+    + (addedCols.length ? ' Dodano kolumny w Danych: ' + addedCols.join(', ') + '.' : '')
     + ' Walidacja Danych zaktualizowana.';
-  ss.toast(msg, 'Inicjalizacja zakończona', 5);
+  ss.toast(msg, 'Inicjalizacja zakończona', 6);
 }
 
 // ---------------------------------------------------------------- Zakładki
@@ -169,6 +173,30 @@ function ensureDane_(ss) {
   });
 
   return true;
+}
+
+/**
+ * Dopisuje brakujące nagłówki kolumn w istniejącej zakładce Dane (np. nowa kolumna Waga na końcu).
+ * Zmienia tylko pusty nagłówek, NIGDY wartości ani istniejących nagłówków.
+ * @return {string[]} nazwy dopisanych kolumn
+ */
+function ensureDaneHeaders_(ss) {
+  const sh = ss.getSheetByName(SHEET_DANE);
+  if (!sh) return [];
+  const n = DANE_COLUMNS.length;
+  if (sh.getMaxColumns() < n) sh.insertColumnsAfter(sh.getMaxColumns(), n - sh.getMaxColumns());
+  const header = sh.getRange(1, 1, 1, n).getValues()[0];
+  const added = [];
+  DANE_COLUMNS.forEach((c, i) => {
+    if (String(header[i]).trim() !== '') return;
+    const cell = sh.getRange(1, i + 1).setValue(c.name);
+    styleHeader_(cell.setFontFamily(STYLE.font).setFontSize(10));
+    if (c.note) cell.setNote(c.note);
+    sh.setColumnWidth(i + 1, c.width);
+    sh.getRange(2, i + 1, Math.max(sh.getMaxRows() - 1, 1), 1).setFontFamily(STYLE.font).setFontSize(10);
+    added.push(c.name);
+  });
+  return added;
 }
 
 /**
@@ -200,6 +228,8 @@ function applyDaneRules_(ss) {
   col(D.powt).setDataValidation(nonNeg('Liczba ≥ 0'));
   col(D.bw).setDataValidation(warn(SpreadsheetApp.newDataValidation()
     .requireNumberBetween(0, BW_MAX).setHelpText('Od 0% do 300%')));
+  col(D.waga).setDataValidation(warn(SpreadsheetApp.newDataValidation()
+    .requireNumberBetween(20, 250).setHelpText('Waga zawodnika w kg (20–250)')));
 
   DANE_COLUMNS.forEach((c, i) => {
     if (c.format) col(i + 1).setNumberFormat(c.format);
@@ -308,6 +338,11 @@ function orderSheets_(ss) {
  */
 function isSnatch_(boj) {
   return /^snatch/i.test(String(boj || '').trim());
+}
+
+/** Czy bój to Pull-Up — Wynik = obciążenie dodatkowe, ciężar = waga + obciążenie, BW% = (waga + obciążenie) / waga. */
+function isPullUp_(boj) {
+  return /^pull-?\s?up$/i.test(String(boj || '').trim());
 }
 
 /** Formuła listy: WSZYSTKIE + unikalne, posortowane wartości kolumny z zakładki Dane. */

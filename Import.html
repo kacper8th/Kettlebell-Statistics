@@ -23,9 +23,9 @@
 </head>
 <body>
   <p>Wybierz plik CSV z wynikami. Pierwszy wiersz to nagłówek:</p>
-  <p><code>Zawody;Kategoria;Bój;Płeć;Imię;Nazwisko;Wynik;BW%;Odważnik;Powtórzenia</code></p>
+  <p><code>Zawody;Kategoria;Bój;Płeć;Imię;Nazwisko;Wynik;BW%;Odważnik;Powtórzenia</code> (opcjonalnie <code>;Waga</code>)</p>
   <p class="hint">Separator średnik albo przecinek, liczby z przecinkiem albo kropką, kodowanie UTF-8.
-    Jeśli plik ma błędy, nic nie zostanie zaimportowane.</p>
+    Jeśli plik ma błędy, nic nie zostanie zaimportowane. Brakujące wagi zostaną policzone z BW%.</p>
 
   <div class="row"><input type="file" id="file" accept=".csv,text/csv"></div>
   <div class="row" id="buttons">
@@ -82,8 +82,12 @@
     function handle(res) {
       if (res.status === 'ok') {
         setButtons('<button class="primary" onclick="google.script.host.close()">Zamknij</button>');
-        show('ok', '<b>Zaimportowano ' + res.count + ' wierszy.</b>' + groupList(res.groups) +
-          (res.replaced ? '<p>Zastąpiono ' + res.replaced + ' wcześniejszych wierszy.</p>' : ''));
+        const failed = res.weightsFailed || [];
+        show(failed.length ? 'warn' : 'ok', '<b>Zaimportowano ' + res.count + ' wierszy.</b>' + groupList(res.groups) +
+          (res.replaced ? '<p>Zastąpiono ' + res.replaced + ' wcześniejszych wierszy.</p>' : '') +
+          '<p>Policzono wagi: ' + (res.weightsFilled || 0) + '.</p>' +
+          (failed.length ? '<p><b>Bez wagi (brak lub błędne BW%):</b></p><ul>' +
+            failed.slice(0, 15).map(f => '<li>' + esc(f) + '</li>').join('') + '</ul>' : ''));
       } else if (res.status === 'conflict') {
         setButtons('<button class="danger" onclick="send(true)">Zastąp</button>' +
                    '<button onclick="google.script.host.close()">Anuluj</button>');

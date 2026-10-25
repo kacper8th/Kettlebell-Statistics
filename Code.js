@@ -73,15 +73,20 @@ function importCsv(text, replace) {
       deleteRows_(sh, conflictRows);
     }
 
-    appendRows_(sh, parsed.rows);
+    ensureDaneHeaders_(ss);
+    const start = appendRows_(sh, parsed.rows);
     applyDaneRules_(ss);
+    const w = fillWeights_(sh, start, parsed.rows.length);
 
     const groups = importKeys.map(k => ({
       name: k,
       count: parsed.rows.filter(r => keyOf(r) === k).length,
     }));
-    ss.toast('Zaimportowano ' + parsed.rows.length + ' wierszy.', 'Import CSV', 5);
-    return { status: 'ok', count: parsed.rows.length, replaced: conflictRows.length, groups: groups };
+    ss.toast('Zaimportowano ' + parsed.rows.length + ' wierszy. Policzono wagi: ' + w.filled + '.', 'Import CSV', 5);
+    return {
+      status: 'ok', count: parsed.rows.length, replaced: conflictRows.length, groups: groups,
+      weightsFilled: w.filled, weightsFailed: w.failed,
+    };
   } finally {
     lock.releaseLock();
   }
@@ -111,11 +116,12 @@ function parseImportCsv_(text) {
   const idx = {};
   DANE_COLUMNS.forEach(c => {
     const i = header.indexOf(c.name.toLowerCase());
-    if (i < 0) errors.push('Brak kolumny „' + c.name + '” w nagłówku pliku.');
+    if (i < 0 && !c.optional) errors.push('Brak kolumny „' + c.name + '” w nagłówku pliku.');
     idx[c.name] = i;
   });
   if (errors.length) {
-    errors.push('Wymagany nagłówek: ' + DANE_COLUMNS.map(c => c.name).join(delim));
+    errors.push('Wymagany nagłówek: ' + DANE_COLUMNS.filter(c => !c.optional).map(c => c.name).join(delim)
+      + ' (opcjonalnie: ' + DANE_COLUMNS.filter(c => c.optional).map(c => c.name).join(', ') + ')');
     return { rows: [], errors: errors };
   }
 
@@ -159,6 +165,9 @@ function parseImportCsv_(text) {
     if (!isSnatch && odwaznik !== null && (isNaN(odwaznik) || odwaznik < 0)) err('„Odważnik” musi być liczbą ≥ 0 albo pusty');
     if (!isSnatch && powt !== null && (isNaN(powt) || powt < 0)) err('„Powtórzenia” musi być liczbą ≥ 0 albo puste');
 
+    const waga = parseNumber_(get('Waga'));                   // kolumna opcjonalna
+    if (waga !== null && (isNaN(waga) || waga <= 0)) err('„Waga” musi być liczbą > 0 albo pusta (jest: „' + get('Waga') + '”)');
+
     const row = [];
     row[D.zawody - 1] = zawody;
     row[D.kategoria - 1] = kategoria;
@@ -170,6 +179,7 @@ function parseImportCsv_(text) {
     row[D.bw - 1] = bw;
     row[D.odwaznik - 1] = odwaznik === null ? '' : odwaznik;
     row[D.powt - 1] = powt === null ? '' : powt;
+    row[D.waga - 1] = waga === null ? '' : waga;
     rows.push(row);
   }
 
@@ -218,12 +228,84 @@ function deleteRows_(sh, rowNumbers) {
   }
 }
 
-/** Dopisuje wiersze pod ostatnim wierszem z danymi (dokłada wiersze arkusza, jeśli brakuje). */
+/**
+ * Dopisuje wiersze pod ostatnim wierszem z danymi (dokłada wiersze arkusza, jeśli brakuje).
+ * @return {number} numer pierwszego dopisanego wiersza
+ */
 function appendRows_(sh, rows) {
   const start = Math.max(sh.getLastRow(), 1) + 1;
   const needed = start + rows.length - 1 - sh.getMaxRows();
   if (needed > 0) sh.insertRowsAfter(sh.getMaxRows(), needed);
   sh.getRange(start, 1, rows.length, DANE_COLUMNS.length).setValues(rows);
+  return start;
+}
+
+// ---------------------------------------------------------------- Wagi
+
+/** Menu 📥 Dane → Policz wagi — uzupełnia puste wagi w całej zakładce Dane. */
+function computeWeights() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sh = ss.getSheetByName(SHEET_DANE);
+  if (!sh) {
+    SpreadsheetApp.getUi().alert('Brak zakładki Dane — uruchom najpierw ⚙️ Setup → Inicjalizacja.');
+    return;
+  }
+  ensureDaneHeaders_(ss);
+  const last = sh.getLastRow();
+  const w = last > 1 ? fillWeights_(sh, 2, last - 1) : { filled: 0, failed: [] };
+  let msg = 'Uzupełniono wagi: ' + w.filled + '.';
+  if (w.failed.length) {
+    SpreadsheetApp.getUi().alert('Policz wagi',
+      msg + '\n\nNie udało się policzyć wagi (brak lub błędne BW%) w ' + w.failed.length + ' wierszach:\n'
+      + w.failed.slice(0, 15).join('\n') + (w.failed.length > 15 ? '\n…' : ''),
+      SpreadsheetApp.getUi().ButtonSet.OK);
+  } else {
+    ss.toast(msg, 'Policz wagi', 5);
+  }
+}
+
+/**
+ * Wylicza wagę z BW% tego samego wiersza — tylko dla pustych komórek Waga (wpisanych wag nie zmienia):
+ *  - Snatch:  waga = odważnik / BW%
+ *  - Pull-Up: waga = obciążenie / (BW% − 1)     (BW% = (waga + obciążenie) / waga)
+ *  - pozostałe boje: waga = wynik / BW%
+ * Wynik zaokrąglony do 0,01 kg i zapisany jako liczba.
+ * @return {{filled: number, failed: string[]}} failed = opisy wierszy, dla których nie dało się policzyć wagi
+ */
+function fillWeights_(sh, startRow, numRows) {
+  if (numRows < 1) return { filled: 0, failed: [] };
+  const data = sh.getRange(startRow, 1, numRows, DANE_COLUMNS.length).getValues();
+  const out = [];
+  let filled = 0;
+  const failed = [];
+  data.forEach((r, i) => {
+    const current = r[D.waga - 1];
+    if (current !== '' && current !== null) {
+      out.push([current]);
+      return;
+    }
+    const boj = r[D.boj - 1];
+    const wynik = Number(r[D.wynik - 1]);
+    const bw = Number(r[D.bw - 1]);
+    const odw = Number(r[D.odwaznik - 1]);
+    let w = null;
+    if (bw > 0) {
+      if (isSnatch_(boj)) w = odw > 0 ? odw / bw : null;
+      else if (isPullUp_(boj)) w = bw > 1 ? wynik / (bw - 1) : null;
+      else w = wynik > 0 ? wynik / bw : null;
+    }
+    if (w && isFinite(w)) {
+      out.push([Math.round(w * 100) / 100]);
+      filled++;
+    } else {
+      out.push(['']);
+      if (r[D.zawody - 1] !== '') {
+        failed.push('wiersz ' + (startRow + i) + ': ' + r[D.imie - 1] + ' ' + r[D.nazwisko - 1] + ' (' + boj + ')');
+      }
+    }
+  });
+  sh.getRange(startRow, D.waga, numRows, 1).setValues(out);
+  return { filled: filled, failed: failed };
 }
 
 function unique_(arr) {
