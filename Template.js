@@ -4,14 +4,18 @@
  * setupTemplate() jest idempotentna — można ją uruchamiać wielokrotnie:
  *  - zakładki z danymi (Ustawienia, Dane) zakłada tylko wtedy, gdy ich brak, i NIGDY nie zmienia ich wartości,
  *  - wyjątek: walidację i formaty kolumn w Danych nakłada przy każdym uruchomieniu (tylko reguły, nie wartości),
- *  - zakładki wyliczane (dochodzą w kolejnych krokach) będzie budować od nowa.
+ *  - zakładki wyliczane (Wyniki, …) czyści i buduje od nowa przy każdym uruchomieniu.
  */
 
 const SHEET_USTAWIENIA = 'Ustawienia';
 const SHEET_DANE = 'Dane';
+const SHEET_WYNIKI = 'Wyniki';
 
 /** Kolejność zakładek w arkuszu (pozostałe zakładki trafiają za nimi). */
-const SHEET_ORDER = [SHEET_USTAWIENIA, SHEET_DANE];
+const SHEET_ORDER = [SHEET_USTAWIENIA, SHEET_DANE, SHEET_WYNIKI];
+
+/** Zakres wierszy obejmowany formułami zakładek wyliczanych (wiersze Danych 2…MAX_ROWS). */
+const MAX_ROWS = 5000;
 
 const STYLE = {
   font: 'Arial',
@@ -140,12 +144,13 @@ function setupTemplate() {
   if (ensureDane_(ss)) created.push(SHEET_DANE);
   const addedCols = ensureDaneHeaders_(ss);
   applyDaneRules_(ss);
+  buildWyniki_(ss);
   removeDefaultSheet_(ss);
   orderSheets_(ss);
 
-  const msg = (created.length ? 'Utworzono: ' + created.join(', ') + '.' : 'Zakładki już istnieją — dane bez zmian.')
+  const msg = (created.length ? 'Utworzono: ' + created.join(', ') + '.' : 'Zakładki z danymi już istnieją — dane bez zmian.')
     + (addedCols.length ? ' Dodano kolumny w Danych: ' + addedCols.join(', ') + '.' : '')
-    + ' Walidacja Danych zaktualizowana.';
+    + ' Walidacja Danych zaktualizowana. Zbudowano: ' + SHEET_WYNIKI + '.';
   ss.toast(msg, 'Inicjalizacja zakończona', 6);
 }
 
@@ -305,6 +310,81 @@ function ensureUstawienia_(ss) {
   });
 
   return true;
+}
+
+// ---------------------------------------------------------------- Wyniki (zakładka wyliczana)
+
+/**
+ * Kolumny zakładki Wyniki. Każda kolumna = jedna formuła ARRAYFORMULA w wierszu 2,
+ * wiersz Wyników = ten sam wiersz Danych. Funkcje: d(kol) — zakres w Danych, w(kol) — zakres w Wynikach.
+ * Ciężar: Pull-Up = waga + obciążenie, pozostałe = wynik (Snatch = tonaż). Wynik(b) = ciężar / waga ^ b.
+ */
+const WYNIKI_COLUMNS = [
+  { key: 'A', name: 'Zawody',          width: 140, f: (d, w) => `IF(${d('C')}="";"";${d('A')})` },
+  { key: 'B', name: 'Kategoria',       width: 180, f: (d, w) => `IF(${d('C')}="";"";${d('B')})` },
+  { key: 'C', name: 'Bój',             width: 75,  f: (d, w) => `IF(${d('C')}="";"";${d('C')})` },
+  { key: 'D', name: 'Płeć',            width: 45,  f: (d, w) => `IF(${d('C')}="";"";${d('D')})` },
+  { key: 'E', name: 'Zawodnik',        width: 190, f: (d, w) => `IF(${d('C')}="";"";${d('E')}&" "&${d('F')})` },
+  { key: 'F', name: 'Wynik',           width: 70,  f: (d, w) => `IF(${d('C')}="";"";${d('G')})` },
+  { key: 'G', name: 'Waga',            width: 65,  f: (d, w) => `IF(${d('C')}="";"";${d('K')})`, format: '0.00' },
+  { key: 'H', name: 'Ciężar',          width: 70,
+    note: 'Ciężar do algorytmów: Pull-Up = waga + obciążenie; pozostałe boje = wynik (Snatch = tonaż).',
+    f: (d, w) => `IF(ISNUMBER(${w('F')})*ISNUMBER(${w('G')});IF(${w('C')}="Pull-Up";${w('G')}+${w('F')};${w('F')});"")` },
+  { key: 'I', name: 'b oficjalny',     width: 75,  format: '0.00',
+    note: 'Współczynnik z Ustawień (sekcja B) wg boju i płci.',
+    f: (d, w) => `IF(${w('C')}="";"";IFERROR(VLOOKUP(${w('C')};{B_OFICJALNE_BOJE\\B_OFICJALNE};IF(${w('D')}="K";2;3);FALSE);""))` },
+  { key: 'J', name: 'W analizie',      width: 75,
+    note: '1 = wiersz wchodzi do analizy: jest ciężar, waga i b oficjalny, wynik > 0 oraz pasuje do filtra Zawody / Kategoria z Ustawień.',
+    f: (d, w) => `IF(${w('C')}="";"";IF(ISNUMBER(${w('H')})*(${w('F')}>0)*ISNUMBER(${w('I')})`
+      + `*((FILTR_ZAWODY="WSZYSTKIE")+(${w('A')}=FILTR_ZAWODY))`
+      + `*((FILTR_KATEGORIA="WSZYSTKIE")+(${w('B')}=FILTR_KATEGORIA));1;0))` },
+  { key: 'K', name: 'Grupa',           width: 110,
+    note: 'Bój | Płeć — grupa do korelacji (krok 4). Puste, gdy wiersz poza analizą.',
+    f: (d, w) => `IF(${w('J')}=1;${w('C')}&" | "&${w('D')};"")` },
+  { key: 'L', name: 'Wynik b=0',       width: 85,  note: 'Siła absolutna: ciężar.',
+    f: (d, w) => `IF(ISNUMBER(${w('H')});${w('H')};"")` },
+  { key: 'M', name: 'Wynik b=1',       width: 85,  format: '0.0000', note: 'Siła względna: ciężar / waga.',
+    f: (d, w) => `IF(ISNUMBER(${w('H')});${w('H')}/${w('G')};"")` },
+  { key: 'N', name: 'Wynik b ofic.',   width: 90,  format: '0.0000', note: 'ciężar / waga ^ b oficjalny',
+    f: (d, w) => `IF(ISNUMBER(${w('H')})*ISNUMBER(${w('I')});${w('H')}/${w('G')}^${w('I')};"")` },
+  { key: 'O', name: 'Wynik Test 1',    width: 85,  format: '0.0000', note: 'ciężar / waga ^ B_TEST_1',
+    f: (d, w) => `IF(ISNUMBER(${w('H')});${w('H')}/${w('G')}^B_TEST_1;"")` },
+  { key: 'P', name: 'Wynik Test 2',    width: 85,  format: '0.0000', note: 'ciężar / waga ^ B_TEST_2',
+    f: (d, w) => `IF(ISNUMBER(${w('H')});${w('H')}/${w('G')}^B_TEST_2;"")` },
+  { key: 'Q', name: 'Wynik Test 3',    width: 85,  format: '0.0000', note: 'ciężar / waga ^ B_TEST_3',
+    f: (d, w) => `IF(ISNUMBER(${w('H')});${w('H')}/${w('G')}^B_TEST_3;"")` },
+];
+
+/** Zakładka Wyniki — wyliczana: czyszczona i budowana od nowa przy każdej Inicjalizacji. */
+function buildWyniki_(ss) {
+  let sh = ss.getSheetByName(SHEET_WYNIKI);
+  if (sh) {
+    sh.clear();                                   // treść + formaty (ten sam arkusz — odwołania z innych zakładek zostają)
+    sh.clearNotes();
+    sh.getRange(1, 1, sh.getMaxRows(), sh.getMaxColumns()).clearDataValidations();
+  } else {
+    sh = ss.insertSheet(SHEET_WYNIKI);
+  }
+  const n = WYNIKI_COLUMNS.length;
+  if (sh.getMaxRows() < MAX_ROWS) sh.insertRowsAfter(sh.getMaxRows(), MAX_ROWS - sh.getMaxRows());
+  if (sh.getMaxColumns() < n) sh.insertColumnsAfter(sh.getMaxColumns(), n - sh.getMaxColumns());
+
+  const d = col => SHEET_DANE + '!' + col + '2:' + col + MAX_ROWS;
+  const w = col => col + '2:' + col + MAX_ROWS;
+
+  sh.getRange(1, 1, MAX_ROWS, n).setFontFamily(STYLE.font).setFontSize(10);
+  styleHeader_(sh.getRange(1, 1, 1, n).setValues([WYNIKI_COLUMNS.map(c => c.name)]).setWrap(true));
+  sh.setFrozenRows(1);
+  sh.setFrozenColumns(5);
+
+  WYNIKI_COLUMNS.forEach((c, i) => {
+    const col = i + 1;
+    sh.setColumnWidth(col, c.width);
+    if (c.note) sh.getRange(1, col).setNote(c.note);
+    if (c.format) sh.getRange(2, col, MAX_ROWS - 1, 1).setNumberFormat(c.format);
+    sh.getRange(2, col).setFormula('=ARRAYFORMULA(' + c.f(d, w) + ')');
+  });
+  sh.getRange('A1').setNote('Zakładka wyliczana — budowana od nowa przy każdej Inicjalizacji. Nie edytuj; dane zmieniaj w zakładce Dane.');
 }
 
 /** Usuwa domyślną zakładkę (Arkusz1 / Sheet1), jeśli jest pusta i nie jest jedyną. */
