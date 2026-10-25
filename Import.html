@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <style>
+    body { font-family: Arial, sans-serif; font-size: 13px; color: #202124; margin: 0; padding: 4px 8px; }
+    p { margin: 6px 0; }
+    .hint { color: #5f6368; font-size: 12px; }
+    code { background: #f1f3f4; padding: 1px 4px; border-radius: 3px; font-size: 12px; }
+    .row { margin: 14px 0; }
+    button { font-family: inherit; font-size: 13px; padding: 7px 16px; border-radius: 4px; border: 1px solid #dadce0;
+             background: #fff; cursor: pointer; margin-right: 6px; }
+    button.primary { background: #1F3A5F; border-color: #1F3A5F; color: #fff; }
+    button.danger { background: #c5221f; border-color: #c5221f; color: #fff; }
+    button:disabled { opacity: .5; cursor: default; }
+    #status { margin-top: 12px; padding: 10px 12px; border-radius: 4px; display: none; max-height: 230px; overflow: auto; }
+    #status.info { display: block; background: #e8f0fe; }
+    #status.ok { display: block; background: #e6f4ea; }
+    #status.error { display: block; background: #fce8e6; }
+    #status.warn { display: block; background: #fef7e0; }
+    #status ul { margin: 6px 0; padding-left: 18px; }
+  </style>
+</head>
+<body>
+  <p>Wybierz plik CSV z wynikami. Pierwszy wiersz to nagłówek:</p>
+  <p><code>Zawody;Kategoria;Bój;Płeć;Imię;Nazwisko;Wynik;BW%;Odważnik;Powtórzenia</code></p>
+  <p class="hint">Separator średnik albo przecinek, liczby z przecinkiem albo kropką, kodowanie UTF-8.
+    Jeśli plik ma błędy, nic nie zostanie zaimportowane.</p>
+
+  <div class="row"><input type="file" id="file" accept=".csv,text/csv"></div>
+  <div class="row" id="buttons">
+    <button class="primary" id="btnImport" onclick="startImport()">Importuj</button>
+    <button onclick="google.script.host.close()">Zamknij</button>
+  </div>
+
+  <div id="status"></div>
+
+  <script>
+    let csvText = null;
+
+    function esc(s) {
+      return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    }
+
+    function show(cls, html) {
+      const el = document.getElementById('status');
+      el.className = cls;
+      el.innerHTML = html;
+    }
+
+    function setButtons(html) {
+      document.getElementById('buttons').innerHTML = html;
+    }
+
+    function defaultButtons() {
+      setButtons('<button class="primary" id="btnImport" onclick="startImport()">Importuj</button>' +
+                 '<button onclick="google.script.host.close()">Zamknij</button>');
+    }
+
+    function startImport() {
+      const f = document.getElementById('file').files[0];
+      if (!f) { show('error', 'Najpierw wybierz plik CSV.'); return; }
+      const reader = new FileReader();
+      reader.onload = e => { csvText = e.target.result; send(false); };
+      reader.onerror = () => show('error', 'Nie udało się odczytać pliku.');
+      reader.readAsText(f, 'UTF-8');
+    }
+
+    function send(replace) {
+      setButtons('<button disabled>Importuję…</button>');
+      show('info', 'Importuję dane…');
+      google.script.run
+        .withSuccessHandler(handle)
+        .withFailureHandler(err => { defaultButtons(); show('error', 'Błąd: ' + esc(err.message || err)); })
+        .importCsv(csvText, replace);
+    }
+
+    function groupList(groups) {
+      return '<ul>' + groups.map(g => '<li>' + esc(g.name) + ' — ' + g.count + ' wierszy</li>').join('') + '</ul>';
+    }
+
+    function handle(res) {
+      if (res.status === 'ok') {
+        setButtons('<button class="primary" onclick="google.script.host.close()">Zamknij</button>');
+        show('ok', '<b>Zaimportowano ' + res.count + ' wierszy.</b>' + groupList(res.groups) +
+          (res.replaced ? '<p>Zastąpiono ' + res.replaced + ' wcześniejszych wierszy.</p>' : ''));
+      } else if (res.status === 'conflict') {
+        setButtons('<button class="danger" onclick="send(true)">Zastąp</button>' +
+                   '<button onclick="google.script.host.close()">Anuluj</button>');
+        show('warn', '<b>W zakładce Dane są już wiersze tych zawodów i kategorii:</b>' + groupList(res.groups) +
+          '<p><b>Zastąp</b> usunie te wiersze i wstawi dane z pliku. <b>Anuluj</b> niczego nie zmieni.</p>');
+      } else {
+        defaultButtons();
+        const more = res.total > res.errors.length ? '<p>… i ' + (res.total - res.errors.length) + ' kolejnych błędów.</p>' : '';
+        show('error', '<b>Nic nie zaimportowano — popraw plik.</b><ul>' +
+          res.errors.map(e => '<li>' + esc(e) + '</li>').join('') + '</ul>' + more);
+      }
+    }
+  </script>
+</body>
+</html>

@@ -2,7 +2,8 @@
  * Template.js — struktura arkusza (Inicjalizacja).
  *
  * setupTemplate() jest idempotentna — można ją uruchamiać wielokrotnie:
- *  - zakładki z danymi (Ustawienia, Dane) zakłada tylko wtedy, gdy ich brak, i NIGDY ich nie czyści,
+ *  - zakładki z danymi (Ustawienia, Dane) zakłada tylko wtedy, gdy ich brak, i NIGDY nie zmienia ich wartości,
+ *  - wyjątek: walidację i formaty kolumn w Danych nakłada przy każdym uruchomieniu (tylko reguły, nie wartości),
  *  - zakładki wyliczane (dochodzą w kolejnych krokach) będzie budować od nowa.
  */
 
@@ -37,16 +38,28 @@ const DANE_COLUMNS = [
   { name: 'Powtórzenia', width: 100, note: 'Tylko Snatch — liczba powtórzeń.' },
 ];
 
+/** Numery kolumn w Danych (1 = A). */
+const D = { zawody: 1, kategoria: 2, boj: 3, plec: 4, imie: 5, nazwisko: 6, wynik: 7, bw: 8, odwaznik: 9, powt: 10 };
+
+const PLCIE = ['K', 'M'];
+
+/** Maksymalna wartość BW% (jako ułamek) uznawana za poprawną — 3 = 300%. */
+const BW_MAX = 3;
+
 // ---------------------------------------------------------------- Ustawienia
 
 const WSZYSTKIE = 'WSZYSTKIE';
 
-/** Współczynniki oficjalne — wartości startowe (podane przez organizatora). */
+/**
+ * Współczynniki oficjalne — wartości startowe (podane przez organizatora).
+ * Odmiany Snatcha (2', 6') to osobne boje — nie łączymy ich w analizie.
+ */
 const B_OFICJALNE_START = [
-  ['TGU',    0.60, 0.67],
-  ['SSP',    0.60, 0.67],
-  ['2KBSQ',  0.60, 0.67],
-  ['Snatch', 0.40, 0.40],
+  ['TGU',       0.60, 0.67],
+  ['SSP',       0.60, 0.67],
+  ['2KBSQ',     0.60, 0.67],
+  ["Snatch 2'", 0.40, 0.40],
+  ["Snatch 6'", 0.40, 0.40],
 ];
 
 /** Współczynniki testowe — wartości startowe. */
@@ -59,16 +72,28 @@ const B_TESTOWE_START = [
 /** Liczba kroków skanu b (start, start + krok, … start + (SKAN_KROKI − 1) · krok). */
 const SKAN_KROKI = 151;
 
-/** Układ zakładki Ustawienia — adresy komórek i zakresy nazwane. */
+/** Układ zakładki Ustawienia — numery wierszy sekcji wyliczane z liczby bojów i testów. */
+const U_ROWS = (() => {
+  const bFirst = 10;                                   // pierwszy bój w sekcji B
+  const bLast = bFirst + B_OFICJALNE_START.length - 1;
+  const cHead = bLast + 2;                             // nagłówek sekcji C
+  const cFirst = cHead + 1;
+  const cLast = cFirst + B_TESTOWE_START.length - 1;
+  const dHead = cLast + 2;                             // nagłówek sekcji D
+  return { bHead: bFirst - 2, bCols: bFirst - 1, bFirst, bLast, cHead, cFirst, cLast,
+           dHead, skanStart: dHead + 1, skanKrok: dHead + 2, skanKoniec: dHead + 3 };
+})();
+
+/** Adresy komórek w Ustawieniach. */
 const U = {
   filtrZawody:    'B5',
   filtrKategoria: 'B6',
-  bOficjalneBoje: 'A10:A13',
-  bOficjalne:     'B10:C13',
-  bTest:          ['B16', 'B17', 'B18'],
-  skanStart:      'B21',
-  skanKrok:       'B22',
-  skanKoniec:     'B23',
+  bOficjalneBoje: 'A' + U_ROWS.bFirst + ':A' + U_ROWS.bLast,
+  bOficjalne:     'B' + U_ROWS.bFirst + ':C' + U_ROWS.bLast,
+  bTest:          B_TESTOWE_START.map((_, i) => 'B' + (U_ROWS.cFirst + i)),
+  skanStart:      'B' + U_ROWS.skanStart,
+  skanKrok:       'B' + U_ROWS.skanKrok,
+  skanKoniec:     'B' + U_ROWS.skanKoniec,
   listaZawodow:   'F5:F200',
   listaKategorii: 'G5:G200',
 };
@@ -90,9 +115,12 @@ const NAMED_RANGES = {
 
 /** Menu w arkuszu. */
 function onOpen() {
-  SpreadsheetApp.getUi()
-    .createMenu('⚙️ Setup')
+  const ui = SpreadsheetApp.getUi();
+  ui.createMenu('⚙️ Setup')
     .addItem('Inicjalizacja', 'setupTemplate')
+    .addToUi();
+  ui.createMenu('📥 Dane')
+    .addItem('Importuj CSV', 'showImportDialog')
     .addToUi();
 }
 
@@ -103,12 +131,12 @@ function setupTemplate() {
 
   if (ensureUstawienia_(ss)) created.push(SHEET_USTAWIENIA);
   if (ensureDane_(ss)) created.push(SHEET_DANE);
+  applyDaneRules_(ss);
   removeDefaultSheet_(ss);
   orderSheets_(ss);
 
-  const msg = created.length
-    ? 'Utworzono: ' + created.join(', ')
-    : 'Wszystkie zakładki już istnieją — nic nie zmieniono.';
+  const msg = (created.length ? 'Utworzono: ' + created.join(', ') : 'Zakładki już istnieją — dane bez zmian.')
+    + ' Walidacja Danych zaktualizowana.';
   ss.toast(msg, 'Inicjalizacja zakończona', 5);
 }
 
@@ -133,10 +161,44 @@ function ensureDane_(ss) {
     const col = i + 1;
     sh.setColumnWidth(col, c.width);
     if (c.note) sh.getRange(1, col).setNote(c.note);
-    if (c.format) sh.getRange(2, col, sh.getMaxRows() - 1, 1).setNumberFormat(c.format);
   });
 
   return true;
+}
+
+/**
+ * Walidacja i formaty kolumn w Danych — nakładane przy każdej Inicjalizacji i po imporcie.
+ * Zmienia wyłącznie reguły i formaty, NIGDY wartości.
+ * Tryb ostrzegawczy: błędna wartość dostaje czerwony trójkąt, ale nie jest blokowana.
+ */
+function applyDaneRules_(ss) {
+  const sh = ss.getSheetByName(SHEET_DANE);
+  if (!sh) return;
+  const rows = sh.getMaxRows() - 1;
+  if (rows < 1) return;
+  const col = c => sh.getRange(2, c, rows, 1);
+  const warn = b => b.setAllowInvalid(true).build();
+  const nonNeg = help => warn(SpreadsheetApp.newDataValidation()
+    .requireNumberGreaterThanOrEqualTo(0).setHelpText(help));
+
+  const boje = ss.getRangeByName('B_OFICJALNE_BOJE');
+  const bojRule = boje
+    ? SpreadsheetApp.newDataValidation().requireValueInRange(boje, true)
+    : SpreadsheetApp.newDataValidation().requireValueInList(B_OFICJALNE_START.map(r => r[0]), true);
+  col(D.boj).setDataValidation(warn(bojRule.setHelpText('Bój z listy w Ustawieniach (sekcja B)')));
+
+  col(D.plec).setDataValidation(warn(SpreadsheetApp.newDataValidation()
+    .requireValueInList(PLCIE, true).setHelpText('K albo M')));
+
+  col(D.wynik).setDataValidation(nonNeg('Liczba ≥ 0 (kg; Snatch = tonaż)'));
+  col(D.odwaznik).setDataValidation(nonNeg('Liczba ≥ 0 (kg)'));
+  col(D.powt).setDataValidation(nonNeg('Liczba ≥ 0'));
+  col(D.bw).setDataValidation(warn(SpreadsheetApp.newDataValidation()
+    .requireNumberBetween(0, BW_MAX).setHelpText('Od 0% do 300%')));
+
+  DANE_COLUMNS.forEach((c, i) => {
+    if (c.format) col(i + 1).setNumberFormat(c.format);
+  });
 }
 
 /**
@@ -170,34 +232,42 @@ function ensureUstawienia_(ss) {
   sh.getRange(U.filtrZawody).setDataValidation(listValidation_(sh.getRange(U.listaZawodow)));
   sh.getRange(U.filtrKategoria).setDataValidation(listValidation_(sh.getRange(U.listaKategorii)));
 
+  const R = U_ROWS;
+
   // B. Współczynniki oficjalne
-  styleSection_(sh.getRange('A8:C8'), 'B. Współczynniki oficjalne');
-  styleHeader_(sh.getRange('A9:C9').setValues([['Bój', 'Kobiety (K)', 'Mężczyźni (M)']]));
+  styleSection_(sh.getRange('A' + R.bHead + ':C' + R.bHead), 'B. Współczynniki oficjalne');
+  styleHeader_(sh.getRange('A' + R.bCols + ':C' + R.bCols).setValues([['Bój', 'Kobiety (K)', 'Mężczyźni (M)']]));
   sh.getRange(U.bOficjalneBoje).setValues(B_OFICJALNE_START.map(r => [r[0]])).setFontWeight('bold');
   styleCoef_(sh.getRange(U.bOficjalne).setValues(B_OFICJALNE_START.map(r => [r[1], r[2]])));
-  sh.getRange('A9').setNote('Współczynniki używane na zawodach (podane przez organizatora).\nwynik = ciężar / waga ^ b');
+  sh.getRange('A' + R.bCols).setNote('Współczynniki używane na zawodach (podane przez organizatora).\n'
+    + 'wynik = ciężar / waga ^ b\n\nLista bojów jest wzorcowa — do niej odwołuje się walidacja i import Danych. '
+    + 'Odmiany Snatcha (2\', 6\') to osobne boje.');
 
   // C. Współczynniki testowe
-  styleSection_(sh.getRange('A15:C15'), 'C. Współczynniki testowe');
-  sh.getRange('A16:A18').setValues(B_TESTOWE_START.map(r => [r[0]])).setFontWeight('bold');
-  styleCoef_(sh.getRange('B16:B18').setValues(B_TESTOWE_START.map(r => [r[1]])));
-  sh.getRange('A16').setNote('Dowolne współczynniki do porównania — te same dla K i M.');
+  styleSection_(sh.getRange('A' + R.cHead + ':C' + R.cHead), 'C. Współczynniki testowe');
+  sh.getRange('A' + R.cFirst + ':A' + R.cLast).setValues(B_TESTOWE_START.map(r => [r[0]])).setFontWeight('bold');
+  styleCoef_(sh.getRange('B' + R.cFirst + ':B' + R.cLast).setValues(B_TESTOWE_START.map(r => [r[1]])));
+  sh.getRange('A' + R.cFirst).setNote('Dowolne współczynniki do porównania — te same dla K i M.');
 
   // D. Skan b
-  styleSection_(sh.getRange('A20:C20'), 'D. Skan b');
-  sh.getRange('A21:A23').setValues([['Start'], ['Krok'], ['Koniec (wyliczony)']]).setFontWeight('bold');
-  styleCoef_(sh.getRange('B21:B22').setValues([[0], [0.01]]));
+  styleSection_(sh.getRange('A' + R.dHead + ':C' + R.dHead), 'D. Skan b');
+  sh.getRange('A' + R.skanStart + ':A' + R.skanKoniec)
+    .setValues([['Start'], ['Krok'], ['Koniec (wyliczony)']]).setFontWeight('bold');
+  styleCoef_(sh.getRange(U.skanStart + ':' + U.skanKrok).setValues([[0], [0.01]]));
   sh.getRange(U.skanKoniec)
     .setFormula('=' + U.skanStart + '+' + (SKAN_KROKI - 1) + '*' + U.skanKrok)
     .setNumberFormat('0.00');
-  sh.getRange('C23').setValue(SKAN_KROKI + ' kroków').setFontStyle('italic').setFontColor(STYLE.noteFont);
+  sh.getRange('C' + R.skanKoniec).setValue(SKAN_KROKI + ' kroków').setFontStyle('italic').setFontColor(STYLE.noteFont);
 
   // Szerokości kolumn
   [[1, 170], [2, 110], [3, 110], [4, 30], [5, 30], [6, 190], [7, 220]]
     .forEach(([col, w]) => sh.setColumnWidth(col, w));
 
-  // Zakresy nazwane
-  Object.entries(NAMED_RANGES).forEach(([name, a1]) => ss.setNamedRange(name, sh.getRange(a1)));
+  // Zakresy nazwane (stare o tych nazwach — np. po ręcznym usunięciu zakładki — są najpierw usuwane)
+  Object.entries(NAMED_RANGES).forEach(([name, a1]) => {
+    try { ss.removeNamedRange(name); } catch (e) { /* nie istniał */ }
+    ss.setNamedRange(name, sh.getRange(a1));
+  });
 
   return true;
 }
@@ -226,6 +296,14 @@ function orderSheets_(ss) {
 }
 
 // ---------------------------------------------------------------- Pomocnicze
+
+/**
+ * Czy bój to odmiana Snatcha (Snatch 2', Snatch 6', …) — wynik = tonaż,
+ * wymagane Odważnik i Powtórzenia, %BW w PDF liczony z odważnika.
+ */
+function isSnatch_(boj) {
+  return /^snatch/i.test(String(boj || '').trim());
+}
 
 /** Formuła listy: WSZYSTKIE + unikalne, posortowane wartości kolumny z zakładki Dane. */
 function uniqueListFormula_(col) {
