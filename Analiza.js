@@ -88,6 +88,7 @@ function computeCorrelationsByCategory() {
   const strata = [];          // tabela 5: jedna kategoria w danym boju
   const classRes = [];        // tabela 2: klasa wagowa × bój
   const classEntries = [], sexEntries = [];   // tabele 3–4: średnio z bojów danego typu
+  const rejectedList = [];                     // odrzucone wartości skrajne — lista na dole zakładki
   let rejectedCount = 0;
   const klasaOf = r => stratumLabel_(r, PODZIALY[0]);
 
@@ -99,9 +100,10 @@ function computeCorrelationsByCategory() {
       let rows = gRows.filter(r => label(r) === k);
       let rej = [];
       if (ctx.skrajne.on && rows.length >= MIN_N) {
-        const kept = filterOutliers_(rows, ctx.skrajne).kept;
-        rej = rows.filter(r => kept.indexOf(r) < 0);
-        rows = kept;
+        const f = filterOutliers_(rows, ctx.skrajne);
+        rej = rows.filter(r => f.kept.indexOf(r) < 0);
+        rows = f.kept;
+        f.rejected.forEach(x => rejectedList.push(Object.assign({ grupa: g.key, warstwa: k }, x)));
       }
       rejectedCount += rej.length;
       const rec = makeStratum_(rows, { grupa: g.key, kategoria: k, out: rej.length });
@@ -138,7 +140,7 @@ function computeCorrelationsByCategory() {
     || bojOrder.indexOf(a.boj) - bojOrder.indexOf(b.boj));
 
   const typeRes = { klasy: poolByType_(ctx, classEntries, klasyOrder), plcie: poolByType_(ctx, sexEntries, PLCIE) };
-  writeKorKat_(ss, ctx, groups, classRes, strata, typeRes);
+  writeKorKat_(ss, ctx, groups, classRes, strata, typeRes, rejectedList);
   ss.toast('Policzono korelacje w kategoriach: ' + groups.filter(g => g.k).length + ' grup, '
     + classRes.filter(c => c.k).length + ' wierszy klas wagowych, '
     + strata.filter(x => x.rho.length).length + ' kategorii.'
@@ -256,7 +258,7 @@ function weightClassAnalysis_(ctx) {
   });
 
   // 2. klasa × bój, 3. płeć × bój
-  const classRes = [], sexRes = [], classEntries = [], sexEntries = [];
+  const classRes = [], sexRes = [], classEntries = [], sexEntries = [], rejectedList = [];
   let rejected = 0;
   ctx.groups.forEach(g => {
     const gRows = valid.filter(r => r[W.boj - 1] === g.boj && r[W.plec - 1] === g.plec);
@@ -265,9 +267,10 @@ function weightClassAnalysis_(ctx) {
       let rows = gRows.filter(r => classOf(r) === cl);
       let out = 0;
       if (ctx.skrajne.on && rows.length >= MIN_N) {
-        const kept = filterOutliers_(rows, ctx.skrajne).kept;
-        out = rows.length - kept.length;
-        rows = kept;
+        const f = filterOutliers_(rows, ctx.skrajne);
+        out = rows.length - f.kept.length;
+        rows = f.kept;
+        f.rejected.forEach(x => rejectedList.push(Object.assign({ grupa: g.key, warstwa: cl }, x)));
       }
       rejected += out;
       const rec = makeStratum_(rows, {}, ALGOS_SYM);
@@ -290,7 +293,7 @@ function weightClassAnalysis_(ctx) {
   classRes.sort((a, b) => klasyOrder.indexOf(a.klasa) - klasyOrder.indexOf(b.klasa)
     || bojOrder.indexOf(a.boj) - bojOrder.indexOf(b.boj));
   const typeRes = { klasy: poolByType_(ctx, classEntries, klasyOrder, ALGOS_SYM), plcie: poolByType_(ctx, sexEntries, PLCIE, ALGOS_SYM) };
-  return { overview: overview, classRes: classRes, sexRes: sexRes, typeRes: typeRes, rejected: rejected };
+  return { overview: overview, classRes: classRes, sexRes: sexRes, typeRes: typeRes, rejected: rejected, rejectedList: rejectedList };
 }
 
 /** Zakładka „Korelacje (wagi)”: przegląd klas, klasa × bój, płeć × bój. */
@@ -305,8 +308,8 @@ function writeKorWagi_(ss, ctx, res) {
     sh = ss.insertSheet(SHEET_KOR_WAGI);
   }
   if (sh.getMaxColumns() < 30) sh.insertColumnsAfter(sh.getMaxColumns(), 30 - sh.getMaxColumns());
-  const need = 50 + res.overview.length + res.classRes.length + res.sexRes.length
-    + (res.typeRes ? res.typeRes.klasy.length + res.typeRes.plcie.length : 0);
+  const need = 60 + res.overview.length + res.classRes.length + res.sexRes.length
+    + (res.typeRes ? res.typeRes.klasy.length + res.typeRes.plcie.length : 0) + (res.rejectedList || []).length;
   if (sh.getMaxRows() < need) sh.insertRowsAfter(sh.getMaxRows(), need - sh.getMaxRows());
   sh.getRange(1, 1, sh.getMaxRows(), 30).setFontFamily(STYLE.font).setFontSize(10);
 
@@ -362,6 +365,10 @@ function writeKorWagi_(ss, ctx, res) {
     'Tabela 3: korelacje z klas uśrednione (z = atanh, wagi n − 3) — jak dany algorytm sprawdza się w całym systemie klas.',
     'Kolory: pomarańcz = faworyzuje lżejszych, zielony = neutralny, niebieski = cięższych; p < 0,05 na czerwono. Klasy z n < ' + MIN_N + ' bez statystyk (szare).',
   ].forEach((t, i) => sh.getRange(row + 2 + i, 1).setValue(t).setFontStyle('italic').setFontColor(STYLE.noteFont));
+
+  // ---- Odrzucone w tej analizie
+  writeRejectedTable_(sh, ctx, row + 10, '6. Odrzucone w tej analizie — wartości skrajne w każdej klasie symulacji',
+    'Klasa', res.rejectedList || []);
 
   const FIX = 5, cx = FIX + 1 + ALGOS_SYM.length * 3;
   sh.setColumnWidth(1, 140);
@@ -556,8 +563,9 @@ function normCdf_(x) {
 }
 
 /** Zakładka „Korelacje (kategorie)”: tabela wg płci, tabela wg klas wagowych, szczegóły per kategoria. */
-function writeKorKat_(ss, ctx, groups, classRes, strata, typeRes) {
+function writeKorKat_(ss, ctx, groups, classRes, strata, typeRes, rejectedList) {
   typeRes = typeRes || { klasy: [], plcie: [] };
+  rejectedList = rejectedList || [];
   let sh = ss.getSheetByName(SHEET_KOR_KAT);
   if (sh) {
     sh.clear();
@@ -568,7 +576,8 @@ function writeKorKat_(ss, ctx, groups, classRes, strata, typeRes) {
     sh = ss.insertSheet(SHEET_KOR_KAT);
   }
   if (sh.getMaxColumns() < 30) sh.insertColumnsAfter(sh.getMaxColumns(), 30 - sh.getMaxColumns());
-  const need = 40 + groups.length + classRes.length + strata.length + typeRes.klasy.length + typeRes.plcie.length;
+  const need = 50 + groups.length + classRes.length + strata.length + typeRes.klasy.length + typeRes.plcie.length
+    + rejectedList.length;
   if (sh.getMaxRows() < need) sh.insertRowsAfter(sh.getMaxRows(), need - sh.getMaxRows());
   sh.getRange(1, 1, sh.getMaxRows(), 30).setFontFamily(STYLE.font).setFontSize(10);
 
@@ -627,6 +636,10 @@ function writeKorKat_(ss, ctx, groups, classRes, strata, typeRes) {
     'b z regresji: nachylenie ln(ciężar) względem ln(waga) w obrębie kategorii — wrażliwe na skrajne osoby, dlatego pomocniczo.',
     'Kolory: pomarańcz = faworyzuje lżejszych, zielony = neutralny, niebieski = cięższych; p < 0,05 na czerwono. Kategorie z n < ' + MIN_N + ' pominięte (szare).',
   ].forEach((t, i) => sh.getRange(L0 + i, 1).setValue(t).setFontStyle('italic').setFontColor(STYLE.noteFont));
+
+  // ---- Odrzucone w tej analizie
+  writeRejectedTable_(sh, ctx, L0 + 8, '6. Odrzucone w tej analizie — wartości skrajne w każdej kategorii (wg podziału)',
+    'Kategoria (' + ctx.podzial + ')', rejectedList);
 
   const FIX = 5, cx = FIX + 1 + ALGOS.length * 3;
   sh.setColumnWidth(1, 140);
@@ -1083,6 +1096,34 @@ function median_(a) {
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 }
 
+/**
+ * Lista odrzuconych wartości skrajnych na dole zakładki analizy (Korelacje (kategorie) / Korelacje (wagi)).
+ * Każda analiza szuka skrajnych we własnych grupach, więc listy różnią się od zakładki Odrzucone (analiza łączna).
+ * @return {number} ostatni wiersz
+ */
+function writeRejectedTable_(sh, ctx, top, title, warstwaHeader, list) {
+  sh.getRange(top, 1).setValue(title).setFontWeight('bold');
+  if (!ctx.skrajne.on) {
+    sh.getRange(top + 1, 1).setValue('Filtr wartości skrajnych jest wyłączony (Ustawienia, sekcja E).').setFontStyle('italic');
+    return top + 1;
+  }
+  const head = ['Grupa', warstwaHeader, 'Zawody', 'Kategoria (zawody)', 'Zawodnik', 'Waga', 'Ciężar', 'Oczekiwany ciężar', 'Odchylenie', 'z'];
+  styleHeader_(sh.getRange(top + 1, 1, 1, head.length).setValues([head]).setWrap(true));
+  if (!list.length) {
+    sh.getRange(top + 2, 1).setValue('Brak odrzuconych przy tym progu.').setFontStyle('italic');
+    return top + 2;
+  }
+  list.sort((x, y) => x.grupa.localeCompare(y.grupa) || String(x.warstwa).localeCompare(String(y.warstwa)) || x.z - y.z);
+  const rows = list.map(x => [x.grupa, x.warstwa, x.zawody, x.kategoria, x.zawodnik, x.waga, x.ciezar, x.oczekiwany, x.odchylenie, x.z]);
+  const rng = sh.getRange(top + 2, 1, rows.length, head.length).setValues(rows);
+  rng.setBorder(true, true, true, true, true, true, '#BFBFBF', SpreadsheetApp.BorderStyle.SOLID)
+    .setWrap(true).setVerticalAlignment('middle');   // kolumny mają szerokości tabel analiz — długie nazwy się zawijają
+  sh.getRange(top + 2, 6, rows.length, 3).setNumberFormat('0.0').setHorizontalAlignment('center');
+  sh.getRange(top + 2, 9, rows.length, 1).setNumberFormat('+0%;-0%').setHorizontalAlignment('center');
+  sh.getRange(top + 2, 10, rows.length, 1).setNumberFormat('0.00').setHorizontalAlignment('center');
+  return top + 1 + rows.length;
+}
+
 /** Zakładka Odrzucone — lista zawodników pominiętych przez filtr wartości skrajnych (budowana od nowa). */
 function writeOdrzucone_(ss, ctx, rejected) {
   let sh = ss.getSheetByName(SHEET_ODRZUCONE);
@@ -1101,7 +1142,8 @@ function writeOdrzucone_(ss, ctx, rejected) {
     : 'Filtr wartości skrajnych jest wyłączony (Ustawienia, sekcja E → Odrzucaj skrajne = TAK).';
   sh.getRange('A2').setValue(info).setFontWeight('bold');
   sh.getRange('A3').setValue('Obliczono: ' + Utilities.formatDate(new Date(), 'Europe/Warsaw', 'yyyy-MM-dd HH:mm')
-    + ' — razem z 📊 Analiza → Oblicz korelacje.').setFontColor(STYLE.noteFont);
+    + ' — razem z 📊 Analiza → Oblicz korelacje. Dotyczy tylko analizy łącznej; '
+    + 'odrzuconych w Korelacjach (kategorie) i Korelacjach (wagi) pokazuje lista na dole tamtych zakładek.').setFontColor(STYLE.noteFont);
   writeStaleCheck_(sh, 'A4', '📊 Analiza → Oblicz korelacje');
 
   const head = ['Grupa', 'Zawody', 'Kategoria', 'Zawodnik', 'Waga', 'Ciężar', 'Oczekiwany ciężar', 'Odchylenie', 'z'];
