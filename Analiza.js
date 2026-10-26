@@ -7,6 +7,7 @@
 const SHEET_KORELACJE = 'Korelacje';
 const SHEET_ODRZUCONE = 'Odrzucone';
 const SHEET_KOR_KAT = 'Korelacje (kategorie)';
+const SHEET_KOR_WAGI = 'Korelacje (wagi)';
 
 /** Kolumny zakładki Wyniki (1 = A) — muszą odpowiadać WYNIKI_COLUMNS w Template.js. */
 const W = { zawody: 1, kategoria: 2, boj: 3, plec: 4, zawodnik: 5, wynik: 6, waga: 7, ciezar: 8, bOfic: 9,
@@ -140,6 +141,230 @@ function computeCorrelationsByCategory() {
     + (ctx.skrajne.on ? ' Odrzucono skrajnych: ' + rejectedCount + '.' : ''), '📊 Analiza', 6);
 }
 
+/**
+ * 📊 Analiza → Oblicz korelacje w klasach (symulacja)
+ * Klasy wagowe z Ustawień (sekcja H) — zawodnik w klasie wg swojej wagi, bez podziału AMATOR / PRO i bez podziału na zawody.
+ * Zakładka „Korelacje (wagi)”: 1) przegląd klas, 2) klasa × bój, 3) płeć × bój (klasy uśrednione Fisherem).
+ */
+function computeCorrelationsByWeightClass() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ctx = analysisContext_(ss);
+  if (!ctx) return;
+  if (!ctx.klasySym) {
+    SpreadsheetApp.getUi().alert('Brak sekcji H (symulacja klas wagowych) w Ustawieniach — uruchom ⚙️ Setup → Inicjalizacja.');
+    return;
+  }
+  const res = weightClassAnalysis_(ctx);
+  writeKorWagi_(ss, ctx, res);
+  ss.toast('Policzono korelacje w klasach (symulacja): ' + res.classRes.filter(c => c.k).length + ' wierszy klasa × bój.'
+    + (ctx.powtorzenia.najnowszy ? ' Pominięto wcześniejszych startów: ' + ctx.powtorzenia.pominietoValid + '.' : '')
+    + (ctx.skrajne.on ? ' Odrzucono skrajnych: ' + res.rejected + '.' : ''), '📊 Analiza', 6);
+}
+
+/**
+ * Granice klas z sekcji H (wiersze = granice, kolumny = K, M) → {K: [posortowane, unikalne], M: […]}.
+ * @return {Object|null} null, gdy brak zakresu
+ */
+function klasySymFromValues_(values) {
+  if (!values) return null;
+  const out = {};
+  PLCIE.forEach((p, j) => {
+    const v = values.map(r => r[j]).filter(x => typeof x === 'number' && x > 0).map(x => Math.round(x * 100) / 100);
+    out[p] = unique_(v).sort((a, b) => a - b);
+  });
+  return out;
+}
+
+/**
+ * Schemat b z sekcji H (wiersze = klasa 1…4, kolumny = K, M) → {K: [b | null, …], M: […]}; null = b oficjalny boju.
+ * Brak zakresu → wszystkie null (schemat = obecna punktacja).
+ */
+function schematBFromValues_(values) {
+  const out = {};
+  PLCIE.forEach((p, j) => {
+    out[p] = Array.from({ length: KLASY_SYM_GRANICE + 1 }, (_, i) => {
+      const v = values && values[i] ? values[i][j] : '';
+      return typeof v === 'number' ? v : null;
+    });
+  });
+  return out;
+}
+
+/** Kolumna (1 = A) wyniku „Schemat” dopisywanego do wierszy Wyników w symulacji klas. */
+const W_SCHEMAT = W.t3 + 1;
+
+/** Algorytmy w „Korelacje (wagi)”: 6 standardowych + Schemat (b wg klasy z sekcji H). */
+const ALGOS_SYM = ALGOS.concat([{ col: W_SCHEMAT, label: 'Schemat' }]);
+
+/** Etykiety klas symulacji dla płci, np. [58, 65, 72] → ['K <58', 'K 58–65', 'K 65–72', 'K 72+']; brak granic → ['K wszystkie']. */
+function simClassLabels_(plec, bounds) {
+  if (!bounds.length) return [plec + ' wszystkie'];
+  const f = v => String(v).replace('.', ',');
+  const out = [plec + ' <' + f(bounds[0])];
+  for (let i = 1; i < bounds.length; i++) out.push(plec + ' ' + f(bounds[i - 1]) + '–' + f(bounds[i]));
+  out.push(plec + ' ' + f(bounds[bounds.length - 1]) + '+');
+  return out;
+}
+
+/** Indeks klasy dla wagi: waga < granica → niższa klasa, waga równa granicy → wyższa (porównanie z dokładnością 0,01 kg). */
+function simClassIndex_(waga, bounds) {
+  const w = Math.round(waga * 100);
+  let i = 0;
+  while (i < bounds.length && w >= Math.round(bounds[i] * 100)) i++;
+  return i;
+}
+
+/**
+ * Obliczenia do „Korelacje (wagi)”. Klasa zawodnika na danych zawodach — z mediany jego wag ze wszystkich bojów
+ * (waga z BW% różni się między bojami o ±0,3 kg, a zawodnik nie może być w dwóch klasach naraz).
+ * @return {{overview, classRes, sexRes, rejected}}
+ */
+function weightClassAnalysis_(ctx) {
+  const startKey = r => r[W.zawody - 1] + '|' + r[W.plec - 1] + '|' + zawodnikKey_(r[W.zawodnik - 1]);
+  const wagiStartu = {};
+  ctx.valid.forEach(r => { (wagiStartu[startKey(r)] = wagiStartu[startKey(r)] || []).push(Number(r[W.waga - 1])); });
+  const wagaStartu = {};
+  Object.keys(wagiStartu).forEach(k => { wagaStartu[k] = median_(wagiStartu[k]); });
+  const labels = {};
+  PLCIE.forEach(p => { labels[p] = simClassLabels_(p, ctx.klasySym[p]); });
+  const idxOf = r => simClassIndex_(wagaStartu[startKey(r)], ctx.klasySym[r[W.plec - 1]]);
+  const classOf = r => labels[r[W.plec - 1]][idxOf(r)];
+  // wynik „Schemat”: ciężar / waga ^ b klasy (sekcja H); puste b = b oficjalny boju
+  const schemat = ctx.schematB || schematBFromValues_(null);
+  const bSchematu = r => { const b = schemat[r[W.plec - 1]][idxOf(r)]; return typeof b === 'number' ? b : Number(r[W.bOfic - 1]); };
+  const valid = ctx.valid.map(r => {
+    const x = r.slice(0, W.t3);
+    x[W_SCHEMAT - 1] = Number(r[W.ciezar - 1]) / Math.pow(Number(r[W.waga - 1]), bSchematu(r));
+    return x;
+  });
+
+  // 1. przegląd klas: starty (zawodnik × zawody), waga min / mediana / max
+  const overview = [];
+  PLCIE.forEach(p => {
+    const keys = Object.keys(wagaStartu).filter(k => k.split('|')[1] === p);
+    labels[p].forEach((cl, i) => {
+      const w = keys.filter(k => simClassIndex_(wagaStartu[k], ctx.klasySym[p]) === i).map(k => wagaStartu[k]);
+      overview.push({ klasa: cl, bSchematu: typeof schemat[p][i] === 'number' ? schemat[p][i] : 'oficjalny',
+        starty: w.length, min: w.length ? Math.min.apply(null, w) : '',
+        med: w.length ? median_(w) : '', max: w.length ? Math.max.apply(null, w) : '' });
+    });
+  });
+
+  // 2. klasa × bój, 3. płeć × bój
+  const classRes = [], sexRes = [];
+  let rejected = 0;
+  ctx.groups.forEach(g => {
+    const gRows = valid.filter(r => r[W.boj - 1] === g.boj && r[W.plec - 1] === g.plec);
+    const st = [];
+    labels[g.plec].forEach(cl => {
+      let rows = gRows.filter(r => classOf(r) === cl);
+      let out = 0;
+      if (ctx.skrajne.on && rows.length >= MIN_N) {
+        const kept = filterOutliers_(rows, ctx.skrajne).kept;
+        out = rows.length - kept.length;
+        rows = kept;
+      }
+      rejected += out;
+      const rec = makeStratum_(rows, {}, ALGOS_SYM);
+      st.push(rec);
+      const pooled = poolStrata_([rec], ALGOS_SYM);
+      if (rows.length) {
+        classRes.push(Object.assign({ key: cl + ' | ' + g.boj, klasa: cl, boj: g.boj, bOfic: g.bOfic, out: out }, pooled,
+          { n: rows.length }));
+      }
+    });
+    sexRes.push(Object.assign({ key: g.key, bOfic: g.bOfic, out: 0 }, poolStrata_(st, ALGOS_SYM)));
+    sexRes[sexRes.length - 1].out = classRes.filter(c => c.boj === g.boj && labels[g.plec].indexOf(c.klasa) >= 0)
+      .reduce((s, c) => s + c.out, 0);
+  });
+
+  const bojOrder = ctx.groups.map(g => g.boj);
+  const klasyOrder = PLCIE.reduce((a, p) => a.concat(labels[p]), []);
+  classRes.sort((a, b) => klasyOrder.indexOf(a.klasa) - klasyOrder.indexOf(b.klasa)
+    || bojOrder.indexOf(a.boj) - bojOrder.indexOf(b.boj));
+  return { overview: overview, classRes: classRes, sexRes: sexRes, rejected: rejected };
+}
+
+/** Zakładka „Korelacje (wagi)”: przegląd klas, klasa × bój, płeć × bój. */
+function writeKorWagi_(ss, ctx, res) {
+  let sh = ss.getSheetByName(SHEET_KOR_WAGI);
+  if (sh) {
+    sh.clear();
+    sh.clearNotes();
+    sh.setConditionalFormatRules([]);
+    sh.getRange(1, 1, sh.getMaxRows(), sh.getMaxColumns()).breakApart();
+  } else {
+    sh = ss.insertSheet(SHEET_KOR_WAGI);
+  }
+  if (sh.getMaxColumns() < 30) sh.insertColumnsAfter(sh.getMaxColumns(), 30 - sh.getMaxColumns());
+  const need = 40 + res.overview.length + res.classRes.length + res.sexRes.length;
+  if (sh.getMaxRows() < need) sh.insertRowsAfter(sh.getMaxRows(), need - sh.getMaxRows());
+  sh.getRange(1, 1, sh.getMaxRows(), 30).setFontFamily(STYLE.font).setFontSize(10);
+
+  const granice = PLCIE.map(p => p + ': ' + (ctx.klasySym[p].length ? ctx.klasySym[p].map(fmt2_).join(' / ') : 'brak')).join(', ');
+  sh.getRange('A1').setValue('Korelacja wyniku z wagą — symulacja klas wagowych').setFontSize(14).setFontWeight('bold');
+  const sch = ctx.schematB || schematBFromValues_(null);
+  const schemat = PLCIE.map(p => p + ': ' + simClassLabels_(p, ctx.klasySym[p])
+    .map((cl, i) => typeof sch[p][i] === 'number' ? fmt2_(sch[p][i]) : 'ofic.').join(' / ')).join(', ');
+  sh.getRange('A2').setValue('Granice klas (Ustawienia, sekcja H): ' + granice + ' | schemat b: ' + schemat
+    + ' | AMATOR i PRO razem, zawody razem'
+    + ' | zawody = ' + ctx.filtrZawody + ' (filtr Kategoria nie dotyczy)'
+    + powtorzeniaInfo_(ctx, ctx.powtorzenia ? ctx.powtorzenia.pominietoValid : 0)
+    + ' | wartości skrajne: ' + (ctx.skrajne.on
+      ? 'odrzucane w każdej klasie (' + ctx.skrajne.metoda + ', próg ' + fmt2_(ctx.skrajne.prog) + ')' : 'nie odrzucane'))
+    .setFontWeight('bold');
+  sh.getRange('A3').setValue('Obliczono: ' + Utilities.formatDate(new Date(), 'Europe/Warsaw', 'yyyy-MM-dd HH:mm')
+    + ' | Test 1 = ' + fmt2_(ctx.tests[0]) + ', Test 2 = ' + fmt2_(ctx.tests[1]) + ', Test 3 = ' + fmt2_(ctx.tests[2]))
+    .setFontColor(STYLE.noteFont);
+  writeStaleCheck_(sh, 'A4', '📊 Analiza → Oblicz korelacje w klasach (symulacja)', '&"|"&IFERROR(TEXTJOIN(";";FALSE;KLASY_SYM);"")&"|"&IFERROR(TEXTJOIN(";";FALSE;KLASY_SYM_B);"")');
+
+  // ---- 1. Przegląd klas
+  sh.getRange(6, 1).setValue('1. Klasy wagowe w symulacji — starty (zawodnik × zawody) i wagi').setFontWeight('bold');
+  const oHead = ['Klasa', 'startów', 'waga min', 'mediana', 'waga max', 'b schematu'];
+  styleHeader_(sh.getRange(7, 1, 1, oHead.length).setValues([oHead]));
+  const ov = res.overview.map(o => [o.klasa, o.starty, o.min, o.med, o.max, o.bSchematu]);
+  const orng = sh.getRange(8, 1, ov.length, oHead.length).setValues(ov);
+  orng.setBorder(true, true, true, true, true, true, '#BFBFBF', SpreadsheetApp.BorderStyle.SOLID);
+  sh.getRange(8, 1, ov.length, 1).setFontWeight('bold');
+  sh.getRange(8, 2, ov.length, 5).setHorizontalAlignment('center');
+  sh.getRange(8, 3, ov.length, 3).setNumberFormat('0.0');
+  sh.getRange(8, 6, ov.length, 1).setNumberFormat('0.00').setBackground('#FFF2CC');
+  let row = 8 + ov.length - 1;
+
+  const algoTitle = (a, i) => a.test ? a.label + ' (b = ' + fmt2_(ctx.tests[i - 3]) + ')' : a.label;
+
+  // ---- 2. Klasa × bój
+  row = writeSummaryTable_(sh, ctx, row + 2, '2. Klasa × bój — wszyscy zawodnicy klasy razem (AMATOR, PRO, wszystkie zawody)',
+    'Klasa | bój', res.classRes, algoTitle, true, ALGOS_SYM);
+
+  // ---- 3. Płeć × bój
+  row = writeSummaryTable_(sh, ctx, row + 2, '3. Podsumowanie wg płci — bój | płeć (klasy uśrednione metodą Fishera; „kategorii” = liczba klas)',
+    'Grupa', res.sexRes, algoTitle, false, ALGOS_SYM);
+
+  // ---- Legenda
+  [
+    'Schemat: ciężar / waga ^ b klasy z Ustawień (sekcja H, „b w schemacie”); puste pole = b oficjalny boju. Tabela 3 pokazuje, jak cały schemat działa razem.',
+    'Klasa zawodnika wg jego wagi na danych zawodach (mediana wag z bojów); waga równa granicy należy do wyższej klasy (85,0 → 85+).',
+    'Uwaga: wagi pochodzą z zawodów z obecnymi klasami (zbijanie do 85 / 65, starty tuż nad granicą) — przy innych granicach zawodnicy mogliby zachowywać się inaczej.',
+    'ρ (Spearman) — wskaźnik główny; r (Pearson, szary) — pomocniczo. b neutralne (ρ = 0) szukane od −1 do 2 co 0,01.',
+    'Tabela 3: korelacje z klas uśrednione (z = atanh, wagi n − 3) — jak dany algorytm sprawdza się w całym systemie klas.',
+    'Kolory: pomarańcz = faworyzuje lżejszych, zielony = neutralny, niebieski = cięższych; p < 0,05 na czerwono. Klasy z n < ' + MIN_N + ' bez statystyk (szare).',
+  ].forEach((t, i) => sh.getRange(row + 2 + i, 1).setValue(t).setFontStyle('italic').setFontColor(STYLE.noteFont));
+
+  const FIX = 5, cx = FIX + 1 + ALGOS_SYM.length * 3;
+  sh.setColumnWidth(1, 140);
+  sh.setColumnWidth(2, 75);
+  sh.setColumnWidth(3, 70);
+  sh.setColumnWidth(4, 75);
+  sh.setColumnWidth(5, 70);
+  for (let c = 6; c <= cx + 3; c++) sh.setColumnWidth(c, 60);
+  [cx, cx + 1, cx + 2, cx + 3].forEach(c => sh.setColumnWidth(c, 105));
+  sh.setFrozenRows(0);
+  sh.setFrozenColumns(1);
+  orderSheets_(ss);
+  ss.setActiveSheet(sh);
+}
+
 /** Etykiety klas wagowych dla płci, np. K → ['K 65', 'K +65']. */
 function klasyDlaPlci_(plec) {
   const lim = KLASY_WAGOWE[plec];
@@ -147,13 +372,14 @@ function klasyDlaPlci_(plec) {
 }
 
 /** Statystyki jednej kategorii: r i ρ dla każdego algorytmu, b z regresji, b neutralne. */
-function makeStratum_(rows, meta) {
+function makeStratum_(rows, meta, algos) {
+  const A = algos || ALGOS;
   const rec = Object.assign({ n: rows.length, r: [], rho: [], loglog: '', bNeutral: '' }, meta);
   if (rows.length < MIN_N) return rec;
   const w = rows.map(r => Number(r[W.waga - 1]));
   const c = rows.map(r => Number(r[W.ciezar - 1]));
-  rec.r = ALGOS.map(a => pearson_(w, rows.map(r => Number(r[a.col - 1]))));
-  rec.rho = ALGOS.map(a => spearman_(w, rows.map(r => Number(r[a.col - 1]))));
+  rec.r = A.map(a => pearson_(w, rows.map(r => Number(r[a.col - 1]))));
+  rec.rho = A.map(a => spearman_(w, rows.map(r => Number(r[a.col - 1]))));
   rec.loglog = slope_(w.map(Math.log), c.map(Math.log));
   rec.w = w;
   rec.c = c;
@@ -165,11 +391,12 @@ function makeStratum_(rows, meta) {
  * Uśrednia kategorie (Fisher): ρ (główne, z p i 95% CI) i r dla każdego algorytmu,
  * b z regresji wewnątrz kategorii, b neutralne (ρ = 0), algorytm najbliżej 0.
  */
-function poolStrata_(st) {
+function poolStrata_(st, algos) {
+  const A = algos || ALGOS;
   const used = st.filter(x => x.rho.length && x.rho.every(v => v !== '') && x.r.every(v => v !== ''));
   const res = { k: used.length, n: used.reduce((s, x) => s + x.n, 0), algos: [], within: '', bNeutral: '', closest: '' };
   if (!used.length) return res;
-  ALGOS.forEach((a, i) => {
+  A.forEach((a, i) => {
     const pr = fisherPool_(used.map(x => ({ r: x.r[i], n: x.n })));
     const ps = fisherPool_(used.map(x => ({ r: x.rho[i], n: x.n })), SPEARMAN_VAR);
     res.algos.push({ r: pr.r, rho: ps.r, p: ps.p, lo: ps.lo, hi: ps.hi });
@@ -184,7 +411,7 @@ function poolStrata_(st) {
   res.bNeutral = neutralB_(used);
   let best = 0;
   res.algos.forEach((a, i) => { if (Math.abs(a.rho) < Math.abs(res.algos[best].rho)) best = i; });
-  res.closest = ALGOS[best].label;
+  res.closest = A[best].label;
   return res;
 }
 
@@ -232,7 +459,7 @@ function stratumLabel_(r, podzial) {
     klasa = (m[1] ? '+' : '') + m[2];
   } else {
     const lim = KLASY_WAGOWE[plec] || 0;
-    klasa = (Number(r[W.waga - 1]) > lim ? '+' : '') + lim;
+    klasa = (Math.round(Number(r[W.waga - 1]) * 100) >= lim * 100 ? '+' : '') + lim;   // waga równa granicy → klasa „+”
   }
   const base = plec + ' ' + klasa;
   if (podzial === PODZIALY[1]) return kat.trim().split(/\s+/)[0].toUpperCase() + ' ' + base;
@@ -356,7 +583,8 @@ function writeKorKat_(ss, ctx, groups, classRes, strata) {
  * @param {boolean} skipEmpty — pomijaj wiersze bez danych
  * @return {number} numer ostatniego wiersza tabeli
  */
-function writeSummaryTable_(sh, ctx, top, title, labelHeader, items, algoTitle, skipEmpty) {
+function writeSummaryTable_(sh, ctx, top, title, labelHeader, items, algoTitle, skipEmpty, algos) {
+  const A = algos || ALGOS;
   const hdr = (r, c, rs, cs, text, sub) => {
     const rg = sh.getRange(r, c, rs, cs);
     if (rs > 1 || cs > 1) rg.merge();
@@ -372,14 +600,14 @@ function writeSummaryTable_(sh, ctx, top, title, labelHeader, items, algoTitle, 
   hdr(HR, 3, 2, 1, 'n');
   hdr(HR, 4, 2, 1, 'odrzucono');
   hdr(HR, 5, 2, 1, 'b oficjalny');
-  ALGOS.forEach((a, i) => {
+  A.forEach((a, i) => {
     const c = FIX + 1 + i * 3;
     hdr(HR, c, 1, 3, algoTitle(a, i));
     hdr(SR, c, 1, 1, 'ρ', true);
     hdr(SR, c + 1, 1, 1, 'p', true);
     hdr(SR, c + 2, 1, 1, 'r', true);
   });
-  const cx = FIX + 1 + ALGOS.length * 3;
+  const cx = FIX + 1 + A.length * 3;
   hdr(HR, cx, 2, 1, 'b neutralne (ρ = 0)');
   hdr(HR, cx + 1, 2, 1, '95% CI ρ (ofic.)');
   hdr(HR, cx + 2, 2, 1, 'b z regresji (pomocniczo)');
@@ -404,11 +632,11 @@ function writeSummaryTable_(sh, ctx, top, title, labelHeader, items, algoTitle, 
   sh.getRange(R0, 2, out.length, nCols - 1).setHorizontalAlignment('center');
   sh.getRange(R0, 2, out.length, 3).setNumberFormat('0');
   sh.getRange(R0, FIX, out.length, 1).setNumberFormat('0.00');
-  sh.getRange(R0, FIX + 1, out.length, ALGOS.length * 3).setNumberFormat('0.000');
+  sh.getRange(R0, FIX + 1, out.length, A.length * 3).setNumberFormat('0.000');
   sh.getRange(R0, cx + 2, out.length, 1).setNumberFormat('0.00');
-  colorBlocks_(sh, R0, out, FIX, 3, [0, 2], 1);
+  colorBlocks_(sh, R0, out, FIX, 3, [0, 2], 1, A.length);
   sh.getRange(R0, cx, out.length, 1).setNumberFormat('0.00').setFontWeight('bold').setBackground('#FFF2CC');
-  ALGOS.forEach((a, i) => sh.getRange(R0, FIX + 3 + i * 3, out.length, 1).setFontColor('#757575'));
+  A.forEach((a, i) => sh.getRange(R0, FIX + 3 + i * 3, out.length, 1).setFontColor('#757575'));
   list.forEach((g, i) => { if (!g.k) sh.getRange(R0 + i, 1, 1, nCols).setFontColor('#9E9E9E'); });
   // grube linie między blokami (zmiana pierwszego członu etykiety, np. klasy wagowej)
   if (skipEmpty) {
@@ -425,13 +653,14 @@ function writeSummaryTable_(sh, ctx, top, title, labelHeader, items, algoTitle, 
  * Kolory w blokach algorytmów: kolumny korelacji (indeksy colorIdx w bloku) — skala; kolumna p (pIdx) — czerwona, gdy < 0,05.
  * @param {number} step — liczba kolumn w bloku jednego algorytmu
  */
-function colorBlocks_(sh, r0, rows, fix, step, colorIdx, pIdx) {
+function colorBlocks_(sh, r0, rows, fix, step, colorIdx, pIdx, nAlgos) {
+  const nA = nAlgos || ALGOS.length;
   const nCols = rows[0].length;
   const bg = [], fc = [], fw = [];
   rows.forEach(row => {
     const b = [], f = [], w = [];
     for (let c = 0; c < nCols; c++) {
-      const v = row[c], k = c - fix, inBlock = k >= 0 && k < ALGOS.length * step, pos = k % step;
+      const v = row[c], k = c - fix, inBlock = k >= 0 && k < nA * step, pos = k % step;
       b.push(inBlock && colorIdx.indexOf(pos) >= 0 && typeof v === 'number' ? divergingColor_(v) : null);
       const sig = inBlock && pos === pIdx && typeof v === 'number' && v < 0.05;
       f.push(sig ? '#C00000' : null);
@@ -472,9 +701,17 @@ function analysisContext_(ss) {
   }
   const boje = namedRange_(ss, 'B_OFICJALNE_BOJE').getValues().map(v => String(v[0]).trim());
   const bOf = namedRange_(ss, 'B_OFICJALNE').getValues();
+  // wybór bojów do analizy (Ustawienia, sekcja B, kolumna „Analizuj”) — brak kolumny = wszystkie
+  const anRange = namedRange_(ss, 'B_ANALIZUJ');
+  const analizuj = anRange ? anRange.getValues().map(v => v[0] === true) : boje.map(() => true);
+  const bojeWybrane = boje.filter((b, i) => b && analizuj[i]);
+  if (!bojeWybrane.length) {
+    SpreadsheetApp.getUi().alert('Nie wybrano żadnego boju do analizy — zaznacz boje w Ustawieniach (sekcja B, kolumna „Analizuj”).');
+    return null;
+  }
   const groups = [];
   boje.forEach((b, i) => {
-    if (!b) return;
+    if (!b || !analizuj[i]) return;
     PLCIE.forEach((p, j) => groups.push({ key: b + ' | ' + p, boj: b, plec: p, bOfic: bOf[i][j] }));
   });
 
@@ -511,6 +748,9 @@ function analysisContext_(ss) {
     },
     podzial: PODZIALY.indexOf(String(opt('PODZIAL_KATEGORII', PODZIALY[0]))) >= 0
       ? String(opt('PODZIAL_KATEGORII', PODZIALY[0])) : PODZIALY[0],
+    boje: { wybrane: bojeWybrane, wszystkich: boje.filter(b => b).length },
+    klasySym: klasySymFromValues_(namedRange_(ss, 'KLASY_SYM') ? namedRange_(ss, 'KLASY_SYM').getValues() : null),
+    schematB: schematBFromValues_(namedRange_(ss, 'KLASY_SYM_B') ? namedRange_(ss, 'KLASY_SYM_B').getValues() : null),
     filtrZawody: val('FILTR_ZAWODY'),
     filtrKategoria: val('FILTR_KATEGORIA'),
     tests: ALGOS.filter(a => a.test).map(a => val(a.test)),
@@ -566,9 +806,12 @@ function dedupNewest_(rows) {
   return { kept: rows.filter(r => keep.has(r)), dropped: rows.filter(r => !keep.has(r)), conflicts: conflicts };
 }
 
-/** Opis opcji powtórzeń do wiersza z ustawieniami (A2). @param {number} dropped — ile wierszy pominięto */
+/** Opis opcji powtórzeń (i wybranych bojów) do wiersza z ustawieniami (A2). @param {number} dropped — ile wierszy pominięto */
 function powtorzeniaInfo_(ctx, dropped) {
-  return ' | powtórzenia: ' + (ctx.powtorzenia && ctx.powtorzenia.najnowszy
+  const b = ctx.boje;
+  const boje = !b || b.wybrane.length === b.wszystkich ? 'wszystkie'
+    : b.wybrane.join(', ') + ' (' + b.wybrane.length + ' z ' + b.wszystkich + ')';
+  return ' | boje: ' + boje + ' | powtórzenia: ' + (ctx.powtorzenia && ctx.powtorzenia.najnowszy
     ? 'najnowszy start (pominięto ' + dropped + ' wcześniejszych)' : 'wszystkie starty');
 }
 
@@ -693,27 +936,35 @@ function writeKorelacje_(ss, ctx, groups) {
   ss.setActiveSheet(sh);
 }
 
+/** Kolumna podpisu aktualności (ukryta) — za wszystkimi tabelami analiz (AN). */
+const STALE_COL = 40;
+
 /**
- * Wskaźnik aktualności: w kolumnie Z zapisuje „podpis” Ustawień i danych z chwili obliczenia (wartość)
+ * Wskaźnik aktualności: w ukrytej kolumnie STALE_COL zapisuje „podpis” Ustawień i danych z chwili obliczenia (wartość)
  * oraz ten sam podpis liczony na żywo (formuła). Komórka statusu porównuje oba.
  */
-function writeStaleCheck_(sh, statusCell, action) {
+function writeStaleCheck_(sh, statusCell, action, extraSig) {
   const sig = '=FILTR_ZAWODY&"|"&FILTR_KATEGORIA&"|"&TEXTJOIN(";";FALSE;B_OFICJALNE_BOJE;B_OFICJALNE)'
     + '&"|"&B_TEST_1&"|"&B_TEST_2&"|"&B_TEST_3'
-    + '&"|"&IFERROR(SKRAJNE_ODRZUCAJ&SKRAJNE_METODA&SKRAJNE_PROG;"")&"|"&IFERROR(PODZIAL_KATEGORII;"")&"|"&IFERROR(POWTORZENIA;"")'
-    + '&"|"&SUM(' + SHEET_WYNIKI + '!J2:J' + MAX_ROWS + ')&"|"&ROUND(SUM(' + SHEET_WYNIKI + '!H2:H' + MAX_ROWS + ');3)';
-  const live = sh.getRange('Z2');
+    + '&"|"&IFERROR(SKRAJNE_ODRZUCAJ&SKRAJNE_METODA&SKRAJNE_PROG;"")&"|"&IFERROR(PODZIAL_KATEGORII;"")&"|"&IFERROR(POWTORZENIA;"")&"|"&IFERROR(TEXTJOIN(";";FALSE;B_ANALIZUJ);"")'
+    + '&"|"&SUM(' + SHEET_WYNIKI + '!J2:J' + MAX_ROWS + ')&"|"&ROUND(SUM(' + SHEET_WYNIKI + '!H2:H' + MAX_ROWS + ');3)'
+    + (extraSig || '');
+  const C = STALE_COL;
+  if (sh.getMaxColumns() < C) sh.insertColumnsAfter(sh.getMaxColumns(), C - sh.getMaxColumns());
+  sh.showColumns(1, sh.getMaxColumns());          // dawniej podpis był w Z (kolumna 26) i ukrywał dane tabel
+  const L = sh.getRange(1, C).getA1Notation().replace(/\d+$/, '');
+  const live = sh.getRange(2, C);
   live.setFormula(sig);
   SpreadsheetApp.flush();
-  sh.getRange('Z1').setValue(live.getDisplayValue());
+  sh.getRange(1, C).setValue(live.getDisplayValue());
   sh.getRange(statusCell)
-    .setFormula('=IF(Z1=Z2;"✓ Aktualne";"⚠ Ustawienia lub dane zmienione od ostatniego obliczenia — kliknij ' + action + '")')
+    .setFormula('=IF(' + L + '1=' + L + '2;"✓ Aktualne";"⚠ Ustawienia lub dane zmienione od ostatniego obliczenia — kliknij ' + action + '")')
     .setFontWeight('bold');
   const rules = sh.getConditionalFormatRules();
   rules.push(SpreadsheetApp.newConditionalFormatRule().whenTextStartsWith('⚠')
     .setFontColor('#C00000').setBackground('#FCE8E6').setRanges([sh.getRange(statusCell)]).build());
   sh.setConditionalFormatRules(rules);
-  sh.hideColumns(26);
+  sh.hideColumns(C);
 }
 
 // ---------------------------------------------------------------- Wartości skrajne

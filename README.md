@@ -22,7 +22,7 @@ wynik = ciężar / waga_zawodnika ^ b
 | `.claspignore` | clasp wysyła tylko pliki z głównego folderu (bez `tools/`, `dane/`) |
 | `Template.js` | struktura arkusza: Inicjalizacja, Ustawienia, Dane, Wyniki, menu |
 | `Code.js` | import CSV, liczenie wag |
-| `Analiza.js` | analizy liczone skryptem: Korelacje, Korelacje (kategorie), Odrzucone |
+| `Analiza.js` | analizy liczone skryptem: Korelacje, Korelacje (kategorie), Korelacje (wagi), Odrzucone |
 | `Import.html` | okienko importu CSV |
 | `tools/pdf_to_csv.py` | PDF z wynikami → CSV do importu (Python + `pdftotext`) |
 | `tools/test_analiza.js` | logika arkusza uruchamiana lokalnie w Node na `dane/*.csv` (sprawdzanie obliczeń) |
@@ -32,7 +32,7 @@ wynik = ciężar / waga_zawodnika ^ b
 
 - **⚙️ Setup → Inicjalizacja** — buduje / naprawia strukturę (bezpieczne do wielokrotnego uruchamiania)
 - **📥 Dane → Importuj CSV**, **Policz wagi**
-- **📊 Analiza → Oblicz korelacje**, **Oblicz korelacje w kategoriach**
+- **📊 Analiza → Oblicz korelacje**, **Oblicz korelacje w kategoriach**, **Oblicz korelacje w klasach (symulacja)** (granice klas i schemat b w Ustawieniach, sekcja H)
 
 ## Praca z kodem
 
@@ -55,6 +55,8 @@ Analiza lokalnie (bez arkusza):
 node tools/test_analiza.js
 node tools/test_analiza.js --zawody "MP 2026 Bochnia" --podzial 2 --skrajne off
 node tools/test_analiza.js --powtorzenia najnowszy
+node tools/test_analiza.js --klasy "K:58,65,72;M:75,85,95"
+node tools/test_analiza.js --klasy "K:65;M:85" --schemat "K:,0.25;M:,0" --boje "TGU,SSP,2KBSQ"
 ```
 
 Dokumentacja projektu: Obsidian, `02-Praca/Projekty/Kettlebell Statystyki`.

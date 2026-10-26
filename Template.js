@@ -12,7 +12,7 @@ const SHEET_DANE = 'Dane';
 const SHEET_WYNIKI = 'Wyniki';
 
 /** Kolejność zakładek w arkuszu (pozostałe zakładki trafiają za nimi). */
-const SHEET_ORDER = [SHEET_USTAWIENIA, SHEET_DANE, SHEET_WYNIKI, 'Korelacje', 'Korelacje (kategorie)', 'Odrzucone'];
+const SHEET_ORDER = [SHEET_USTAWIENIA, SHEET_DANE, SHEET_WYNIKI, 'Korelacje', 'Korelacje (kategorie)', 'Korelacje (wagi)', 'Odrzucone'];
 
 /** Zakres wierszy obejmowany formułami zakładek wyliczanych (wiersze Danych 2…MAX_ROWS). */
 const MAX_ROWS = 5000;
@@ -82,6 +82,12 @@ const B_TESTOWE_START = [
 /** Liczba kroków skanu b (start, start + krok, … start + (SKAN_KROKI − 1) · krok). */
 const SKAN_KROKI = 151;
 
+/** Symulacja klas wagowych (sekcja H): liczba pól na granice dla każdej płci → do 4 klas na płeć. */
+const KLASY_SYM_GRANICE = 3;
+
+/** Wartości startowe granic (kg) — obecny podział: K 65, M 85. Wiersz = granica 1…3, kolumny = K, M. */
+const KLASY_SYM_START = [[65, 85], ['', ''], ['', '']];
+
 /** Układ zakładki Ustawienia — numery wierszy sekcji wyliczane z liczby bojów i testów. */
 const U_ROWS = (() => {
   const bFirst = 10;                                   // pierwszy bój w sekcji B
@@ -94,7 +100,10 @@ const U_ROWS = (() => {
            dHead, skanStart: dHead + 1, skanKrok: dHead + 2, skanKoniec: dHead + 3,
            eHead: dHead + 5, eOn: dHead + 6, eMetoda: dHead + 7, eProg: dHead + 8,
            fHead: dHead + 10, fPodzial: dHead + 11,
-           gHead: dHead + 13, gPowt: dHead + 14 };
+           gHead: dHead + 13, gPowt: dHead + 14,
+           hHead: dHead + 16, hCols: dHead + 17, hFirst: dHead + 18, hLast: dHead + 17 + KLASY_SYM_GRANICE,
+           hbCols: dHead + 19 + KLASY_SYM_GRANICE, hbFirst: dHead + 20 + KLASY_SYM_GRANICE,
+           hbLast: dHead + 20 + 2 * KLASY_SYM_GRANICE };
 })();
 
 /** Adresy komórek w Ustawieniach. */
@@ -103,6 +112,7 @@ const U = {
   filtrKategoria: 'B6',
   bOficjalneBoje: 'A' + U_ROWS.bFirst + ':A' + U_ROWS.bLast,
   bOficjalne:     'B' + U_ROWS.bFirst + ':C' + U_ROWS.bLast,
+  bAnalizuj:      'D' + U_ROWS.bFirst + ':D' + U_ROWS.bLast,
   bTest:          B_TESTOWE_START.map((_, i) => 'B' + (U_ROWS.cFirst + i)),
   skanStart:      'B' + U_ROWS.skanStart,
   skanKrok:       'B' + U_ROWS.skanKrok,
@@ -112,6 +122,8 @@ const U = {
   skrajneProg:    'B' + U_ROWS.eProg,
   podzial:        'B' + U_ROWS.fPodzial,
   powtorzenia:    'B' + U_ROWS.gPowt,
+  klasySym:       'B' + U_ROWS.hFirst + ':C' + U_ROWS.hLast,
+  klasySymB:      'B' + U_ROWS.hbFirst + ':C' + U_ROWS.hbLast,
   listaZawodow:   'F5:F200',
   listaKategorii: 'G5:G200',
 };
@@ -122,6 +134,7 @@ const NAMED_RANGES = {
   FILTR_KATEGORIA:  U.filtrKategoria,
   B_OFICJALNE_BOJE: U.bOficjalneBoje,
   B_OFICJALNE:      U.bOficjalne,
+  B_ANALIZUJ:       U.bAnalizuj,
   B_TEST_1:         U.bTest[0],
   B_TEST_2:         U.bTest[1],
   B_TEST_3:         U.bTest[2],
@@ -132,6 +145,8 @@ const NAMED_RANGES = {
   SKRAJNE_PROG:     U.skrajneProg,
   PODZIAL_KATEGORII: U.podzial,
   POWTORZENIA:      U.powtorzenia,
+  KLASY_SYM:        U.klasySym,
+  KLASY_SYM_B:      U.klasySymB,
 };
 
 // ---------------------------------------------------------------- Menu i Inicjalizacja
@@ -149,6 +164,7 @@ function onOpen() {
   ui.createMenu('📊 Analiza')
     .addItem('Oblicz korelacje', 'computeCorrelations')
     .addItem('Oblicz korelacje w kategoriach', 'computeCorrelationsByCategory')
+    .addItem('Oblicz korelacje w klasach (symulacja)', 'computeCorrelationsByWeightClass')
     .addToUi();
 }
 
@@ -163,6 +179,9 @@ function setupTemplate() {
   const addedE = ensureSekcjaSkrajne_(ss);
   const addedF = ensureSekcjaPodzial_(ss);
   const addedG = ensureSekcjaPowtorzenia_(ss);
+  const addedH = ensureSekcjaKlasySym_(ss);
+  const addedHb = ensureSchematB_(ss);
+  const addedAnalizuj = ensureKolumnaAnalizuj_(ss);
   const fixedNames = ensureNamedRanges_(ss);
   applyDaneRules_(ss);
   buildWyniki_(ss);
@@ -174,6 +193,9 @@ function setupTemplate() {
     + (addedE ? ' Dodano w Ustawieniach sekcję E (wartości skrajne).' : '')
     + (addedF ? ' Dodano w Ustawieniach sekcję F (analiza w kategoriach).' : '')
     + (addedG ? ' Dodano w Ustawieniach sekcję G (powtarzający się zawodnicy).' : '')
+    + (addedH ? ' Dodano w Ustawieniach sekcję H (symulacja klas wagowych).' : '')
+    + (addedHb ? ' Dodano w sekcji H współczynniki schematu (b dla każdej klasy).' : '')
+    + (addedAnalizuj ? ' Dodano w Ustawieniach kolumnę „Analizuj” przy bojach (sekcja B).' : '')
     + (fixedNames.length ? ' Naprawiono zakresy nazwane: ' + fixedNames.join(', ') + '.' : '')
     + ' Walidacja Danych zaktualizowana. Zbudowano: ' + SHEET_WYNIKI + '.';
   ss.toast(msg, 'Inicjalizacja zakończona', 6);
@@ -307,6 +329,7 @@ function ensureUstawienia_(ss) {
   sh.getRange('A' + R.bCols).setNote('Współczynniki używane na zawodach (podane przez organizatora).\n'
     + 'wynik = ciężar / waga ^ b\n\nLista bojów jest wzorcowa — do niej odwołuje się walidacja i import Danych. '
     + 'Odmiany Snatcha (2\', 6\') to osobne boje.');
+  writeKolumnaAnalizuj_(sh);
 
   // C. Współczynniki testowe
   styleSection_(sh.getRange('A' + R.cHead + ':C' + R.cHead), 'C. Współczynniki testowe');
@@ -333,17 +356,28 @@ function ensureUstawienia_(ss) {
   // G. Powtarzający się zawodnicy
   writeSekcjaPowtorzenia_(sh);
 
+  // H. Symulacja klas wagowych
+  writeSekcjaKlasySym_(sh);
+
   // Szerokości kolumn
-  [[1, 170], [2, 110], [3, 110], [4, 30], [5, 30], [6, 190], [7, 220]]
+  [[1, 170], [2, 110], [3, 110], [4, 70], [5, 30], [6, 190], [7, 220]]
     .forEach(([col, w]) => sh.setColumnWidth(col, w));
 
   // Zakresy nazwane (stare o tych nazwach — np. po ręcznym usunięciu zakładki — są najpierw usuwane)
-  Object.entries(NAMED_RANGES).forEach(([name, a1]) => {
-    try { ss.removeNamedRange(name); } catch (e) { /* nie istniał */ }
-    ss.setNamedRange(name, sh.getRange(a1));
-  });
+  Object.entries(NAMED_RANGES).forEach(([name, a1]) => setNamedRange_(ss, name, sh.getRange(a1)));
 
   return true;
+}
+
+/**
+ * Ustawia zakres nazwany: usuwa tylko te zakresy o tej nazwie, które naprawdę istnieją (z listy getNamedRanges,
+ * także uszkodzone #REF!), potem zakłada nowy.
+ * Nie używać ss.removeNamedRange(name) „na ślepo” w try/catch — Apps Script wykonuje zmiany odroczone,
+ * więc błąd „Zakres o nazwie … nie istnieje” wylatuje dopiero przy następnym odczycie, poza try/catch.
+ */
+function setNamedRange_(ss, name, range) {
+  ss.getNamedRanges().filter(n => n.getName() === name).forEach(n => n.remove());
+  ss.setNamedRange(name, range);
 }
 
 /** Zakres nazwany albo null, gdy nie istnieje (getRangeByName potrafi wtedy rzucić wyjątek). */
@@ -373,8 +407,7 @@ function ensureNamedRanges_(ss) {
       ok = false;
     }
     if (ok) return;
-    ss.getNamedRanges().filter(n => n.getName() === name).forEach(n => n.remove());
-    ss.setNamedRange(name, sh.getRange(a1));
+    setNamedRange_(ss, name, sh.getRange(a1));
     fixed.push(name);
   });
   return fixed;
@@ -402,8 +435,7 @@ function writeSekcjaPodzial_(sh) {
     + '• Zawody × kategoria — każda kategoria każdych zawodów osobno (najdrobniejszy podział)\n\n'
     + 'Kategoria bez klasy wagowej (np. PRO KOBIET w PP 2024) → klasa wg wagi zawodnika (granice: K 65 kg, M 85 kg).');
   sh.getRange('C' + R.fPodzial).setValue('wybierz z listy').setFontStyle('italic').setFontColor(STYLE.noteFont);
-  try { ss.removeNamedRange('PODZIAL_KATEGORII'); } catch (e) { /* nie istniał */ }
-  ss.setNamedRange('PODZIAL_KATEGORII', sh.getRange(U.podzial));
+  setNamedRange_(ss, 'PODZIAL_KATEGORII', sh.getRange(U.podzial));
 }
 
 /** Dopisuje sekcję F do istniejących Ustawień, jeśli jej brak. @return {boolean} */
@@ -438,8 +470,7 @@ function writeSekcjaPowtorzenia_(sh) {
     + 'Zawodnik = imię + nazwisko (bez względu na wielkość liter i polskie znaki). '
     + 'Kolejność zawodów — rok z nazwy zawodów (np. „MP 2026 Bochnia” → 2026).');
   sh.getRange('C' + R.gPowt).setValue('wybierz z listy').setFontStyle('italic').setFontColor(STYLE.noteFont);
-  try { ss.removeNamedRange('POWTORZENIA'); } catch (e) { /* nie istniał */ }
-  ss.setNamedRange('POWTORZENIA', sh.getRange(U.powtorzenia));
+  setNamedRange_(ss, 'POWTORZENIA', sh.getRange(U.powtorzenia));
 }
 
 /** Dopisuje sekcję G do istniejących Ustawień, jeśli jej brak (komórka nagłówka pusta). @return {boolean} */
@@ -448,6 +479,99 @@ function ensureSekcjaPowtorzenia_(ss) {
   if (!sh || namedRange_(ss, 'POWTORZENIA')) return false;
   if (String(sh.getRange('A' + U_ROWS.gHead).getValue()).trim() !== '') return false;
   writeSekcjaPowtorzenia_(sh);
+  return true;
+}
+
+/**
+ * Sekcja H Ustawień — symulacja klas wagowych: do 3 granic (kg) dla K i M → do 4 klas na płeć.
+ * Zawodnik trafia do klasy wg swojej wagi (bez podziału AMATOR / PRO). Granica należy do wyższej klasy.
+ */
+function writeSekcjaKlasySym_(sh) {
+  const R = U_ROWS;
+  const ss = sh.getParent();
+  styleSection_(sh.getRange('A' + R.hHead + ':C' + R.hHead), 'H. Symulacja klas wagowych');
+  styleHeader_(sh.getRange('A' + R.hCols + ':C' + R.hCols).setValues([['Granica (kg)', 'Kobiety (K)', 'Mężczyźni (M)']]));
+  sh.getRange('A' + R.hFirst + ':A' + R.hLast)
+    .setValues(KLASY_SYM_START.map((_, i) => ['Granica ' + (i + 1)])).setFontWeight('bold');
+  const rng = sh.getRange(U.klasySym);
+  styleInput_(rng.setValues(KLASY_SYM_START)).setNumberFormat('0.0');
+  rng.setDataValidation(SpreadsheetApp.newDataValidation()
+    .requireNumberBetween(20, 250).setAllowInvalid(false).setHelpText('Waga w kg (20–250) albo puste').build());
+  sh.getRange('A' + R.hHead).setNote(
+    'Granice klas wagowych do 📊 Analiza → Oblicz korelacje w klasach (symulacja) → zakładka „Korelacje (wagi)”.\n\n'
+    + 'Do ' + KLASY_SYM_GRANICE + ' granic dla każdej płci (puste pole = mniej klas), np. K: 58, 65, 72 → K <58, K 58–65, K 65–72, K 72+.\n'
+    + 'Kolejność wpisywania bez znaczenia (skrypt sortuje).\n\n'
+    + 'Zawodnik trafia do klasy wg swojej wagi z Danych — bez podziału AMATOR / PRO i bez podziału na zawody. '
+    + 'Waga równa granicy należy do wyższej klasy (85,0 → 85+), tak jak w danych z zawodów.\n'
+    + 'Domyślnie K 65 / M 85 = obecny podział.');
+  setNamedRange_(ss, 'KLASY_SYM', rng);
+  writeSchematB_(sh);
+}
+
+/**
+ * Część sekcji H — schemat punktacji: b dla każdej klasy symulacji (klasa 1 = najlżejsza), osobno K i M.
+ * Puste pole = b oficjalny danego boju (sekcja B). Wpisane b dotyczy wszystkich bojów tej klasy (także Snatcha).
+ */
+function writeSchematB_(sh) {
+  const R = U_ROWS;
+  const ss = sh.getParent();
+  styleHeader_(sh.getRange('A' + R.hbCols + ':C' + R.hbCols).setValues([['b w schemacie', 'Kobiety (K)', 'Mężczyźni (M)']]));
+  sh.getRange('A' + R.hbFirst + ':A' + R.hbLast)
+    .setValues(Array.from({ length: KLASY_SYM_GRANICE + 1 }, (_, i) =>
+      ['Klasa ' + (i + 1) + (i === 0 ? ' (najlżejsza)' : '')])).setFontWeight('bold');
+  const rng = sh.getRange(U.klasySymB);
+  styleInput_(rng.clearContent()).setNumberFormat('0.00');
+  rng.setDataValidation(SpreadsheetApp.newDataValidation()
+    .requireNumberBetween(0, 2).setAllowInvalid(false).setHelpText('b od 0 do 2 albo puste (= b oficjalny)').build());
+  sh.getRange('A' + R.hbCols).setNote(
+    'Schemat punktacji do sprawdzenia w „Korelacje (wagi)” — dodatkowy algorytm „Schemat”.\n\n'
+    + 'Klasa 1 = najlżejsza, kolejne wg granic powyżej (np. przy 2 granicach klasa 3 = otwarta). '
+    + 'Puste pole = b oficjalny danego boju (sekcja B). Wpisane b dotyczy wszystkich bojów tej klasy, także Snatcha.\n\n'
+    + 'Przykład: M granica 85, klasa 1 puste (0,67), klasa 2 = 0 → klasa otwarta liczona siłą absolutną.\n'
+    + 'Przegląd klas w „Korelacje (wagi)” pokazuje b schematu dla każdej klasy.');
+  setNamedRange_(ss, 'KLASY_SYM_B', rng);
+}
+
+/** Dopisuje schemat b do istniejącej sekcji H, jeśli go brak (pusty nagłówek). @return {boolean} */
+function ensureSchematB_(ss) {
+  const sh = ss.getSheetByName(SHEET_USTAWIENIA);
+  if (!sh || !namedRange_(ss, 'KLASY_SYM') || namedRange_(ss, 'KLASY_SYM_B')) return false;
+  if (String(sh.getRange('A' + U_ROWS.hbCols).getValue()).trim() !== '') return false;
+  writeSchematB_(sh);
+  return true;
+}
+
+/** Dopisuje sekcję H do istniejących Ustawień, jeśli jej brak (komórka nagłówka pusta). @return {boolean} */
+function ensureSekcjaKlasySym_(ss) {
+  const sh = ss.getSheetByName(SHEET_USTAWIENIA);
+  if (!sh || namedRange_(ss, 'KLASY_SYM')) return false;
+  if (String(sh.getRange('A' + U_ROWS.hHead).getValue()).trim() !== '') return false;
+  writeSekcjaKlasySym_(sh);
+  return true;
+}
+
+/**
+ * Kolumna D w sekcji B Ustawień — checkbox „Analizuj” przy każdym boju (domyślnie zaznaczone).
+ * Odznaczony bój znika ze wszystkich analiz (📊 Analiza); Dane, Wyniki i import bez zmian.
+ */
+function writeKolumnaAnalizuj_(sh) {
+  const R = U_ROWS;
+  const ss = sh.getParent();
+  styleHeader_(sh.getRange('D' + R.bCols).setValue('Analizuj').setFontFamily(STYLE.font).setFontSize(10));
+  sh.getRange('D' + R.bCols).setNote('Zaznaczone boje biorą udział w analizach (📊 Analiza). '
+    + 'Odznaczony bój znika ze wszystkich tabel analiz — Dane i Wyniki zostają bez zmian.');
+  const rng = sh.getRange(U.bAnalizuj);
+  rng.insertCheckboxes().setValue(true).setHorizontalAlignment('center').setBackground(STYLE.inputBg);
+  sh.setColumnWidth(4, 70);
+  setNamedRange_(ss, 'B_ANALIZUJ', rng);
+}
+
+/** Dopisuje kolumnę „Analizuj” do istniejących Ustawień, jeśli jej brak (pusty nagłówek D w sekcji B). @return {boolean} */
+function ensureKolumnaAnalizuj_(ss) {
+  const sh = ss.getSheetByName(SHEET_USTAWIENIA);
+  if (!sh || namedRange_(ss, 'B_ANALIZUJ')) return false;
+  if (String(sh.getRange('D' + U_ROWS.bCols).getValue()).trim() !== '') return false;
+  writeKolumnaAnalizuj_(sh);
   return true;
 }
 
@@ -484,10 +608,7 @@ function writeSekcjaSkrajne_(sh) {
   sh.getRange('C' + R.eMetoda).setValue('MAD (odporny) albo SD').setFontStyle('italic').setFontColor(STYLE.noteFont);
   sh.getRange('C' + R.eProg).setValue('MAD: 3,5; SD: 3').setFontStyle('italic').setFontColor(STYLE.noteFont);
   [['SKRAJNE_ODRZUCAJ', U.skrajneOn], ['SKRAJNE_METODA', U.skrajneMetoda], ['SKRAJNE_PROG', U.skrajneProg]]
-    .forEach(([name, a1]) => {
-      try { ss.removeNamedRange(name); } catch (e) { /* nie istniał */ }
-      ss.setNamedRange(name, sh.getRange(a1));
-    });
+    .forEach(([name, a1]) => setNamedRange_(ss, name, sh.getRange(a1)));
 }
 
 /**
