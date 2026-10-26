@@ -8,6 +8,7 @@ const SHEET_KORELACJE = 'Korelacje';
 const SHEET_ODRZUCONE = 'Odrzucone';
 const SHEET_KOR_KAT = 'Korelacje (kategorie)';
 const SHEET_KOR_WAGI = 'Korelacje (wagi)';
+const SHEET_BOOTSTRAP = 'Bootstrap';
 
 /** Kolumny zakładki Wyniki (1 = A) — muszą odpowiadać WYNIKI_COLUMNS w Template.js. */
 const W = { zawody: 1, kategoria: 2, boj: 3, plec: 4, zawodnik: 5, wynik: 6, waga: 7, ciezar: 8, bOfic: 9,
@@ -273,7 +274,7 @@ function weightClassAnalysis_(ctx) {
         f.rejected.forEach(x => rejectedList.push(Object.assign({ grupa: g.key, warstwa: cl }, x)));
       }
       rejected += out;
-      const rec = makeStratum_(rows, {}, ALGOS_SYM);
+      const rec = makeStratum_(rows, {}, ALGOS_SYM, true);
       st.push(rec);
       classEntries.push({ grp: cl, boj: g.boj, bOfic: g.bOfic, strata: [rec], out: out });
       const pooled = poolStrata_([rec], ALGOS_SYM);
@@ -432,6 +433,218 @@ function writeTypeTables_(sh, ctx, top, num, typeRes, algoTitle, labelHeader, al
   return row;
 }
 
+// ---------------------------------------------------------------- Bootstrap
+
+/** Limit czasu bootstrapu (ms) — Apps Script przerywa skrypt po 6 min; zostawiamy zapas na zapis. */
+const BOOT_TIME_LIMIT = 5 * 60 * 1000;
+
+/**
+ * 📊 Analiza → Bootstrap (przedziały ufności)
+ * Losuje zawodników ze zwracaniem (osobno K i M; wylosowany zawodnik wnosi wszystkie swoje wiersze — boje i lata)
+ * i w każdym powtórzeniu liczy od nowa symulację klas (weightClassAnalysis_, z filtrem wartości skrajnych).
+ * 95% przedziały ufności = percentyle 2,5% i 97,5% rozkładu z powtórzeń.
+ */
+function computeBootstrap() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ctx = analysisContext_(ss);
+  if (!ctx) return;
+  if (!ctx.klasySym) {
+    SpreadsheetApp.getUi().alert('Brak sekcji H (symulacja klas wagowych) w Ustawieniach — uruchom ⚙️ Setup → Inicjalizacja.');
+    return;
+  }
+  ss.toast('Bootstrap: ' + ctx.boot.n + ' powtórzeń — to może potrwać kilka minut.', '📊 Analiza', 10);
+  const res = bootstrapAnalysis_(ctx);
+  writeBootstrap_(ss, ctx, res);
+  ss.toast('Bootstrap: wykonano ' + res.done + ' z ' + res.requested + ' powtórzeń (' + Math.round(res.ms / 1000) + ' s).'
+    + (res.done < res.requested ? ' Limit czasu — wynik z mniejszej liczby powtórzeń.' : ''), '📊 Analiza', 8);
+}
+
+/** Generator liczb losowych z ziarnem (mulberry32) — powtarzalne wyniki. */
+function rng_(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6D2B79F5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** Kwantyl posortowanej tablicy (interpolacja liniowa); ±Infinity dozwolone. */
+function quantile_(sorted, q) {
+  if (!sorted.length) return '';
+  const pos = (sorted.length - 1) * q, lo = Math.floor(pos), hi = Math.ceil(pos);
+  if (lo === hi || !isFinite(sorted[lo]) || !isFinite(sorted[hi])) return sorted[q < 0.5 ? lo : hi];
+  return sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo);
+}
+
+/**
+ * Obliczenia bootstrapu: estymata punktowa (weightClassAnalysis_ na prawdziwych danych) + rozkład z powtórzeń.
+ * @return {{tables, done, requested, ms, osoby}}
+ */
+function bootstrapAnalysis_(ctx) {
+  const t0 = Date.now();
+  const point = weightClassAnalysis_(ctx);
+  const tablesDef = [
+    ['klasaBoj', point.classRes], ['plecBoj', point.sexRes], ['klasaTyp', point.typeRes.klasy], ['plecTyp', point.typeRes.plcie],
+  ];
+  // zbieracz: klucz wiersza → listy wartości z powtórzeń
+  const acc = {};
+  tablesDef.forEach(([t, list]) => list.forEach(g => { acc[t + '§' + g.key] = { bn: [], ofic: [], sch: [] }; }));
+  const bnNum = v => typeof v === 'number' ? v : (String(v).indexOf('>') === 0 ? Infinity : (String(v).indexOf('<') === 0 ? -Infinity : null));
+  const collect = res => {
+    [['klasaBoj', res.classRes], ['plecBoj', res.sexRes], ['klasaTyp', res.typeRes.klasy], ['plecTyp', res.typeRes.plcie]]
+      .forEach(([t, list]) => list.forEach(g => {
+        const a = acc[t + '§' + g.key];
+        if (!a || !g.k || !g.algos.length) return;
+        const b = bnNum(g.bNeutral);
+        if (b !== null) a.bn.push(b);
+        if (typeof g.algos[2].rho === 'number') a.ofic.push(g.algos[2].rho);
+        if (g.algos[6] && typeof g.algos[6].rho === 'number') a.sch.push(g.algos[6].rho);
+      }));
+  };
+
+  // zawodnicy (płeć + imię i nazwisko — wszystkie zawody i boje razem)
+  const osoby = {};
+  ctx.valid.forEach(r => {
+    const k = r[W.plec - 1] + '|' + zawodnikKey_(r[W.zawodnik - 1]);
+    (osoby[k] = osoby[k] || []).push(r);
+  });
+  const poPlci = {};
+  Object.keys(osoby).forEach(k => { (poPlci[k.split('|')[0]] = poPlci[k.split('|')[0]] || []).push(osoby[k]); });
+
+  const rand = rng_(ctx.boot.seed);
+  let done = 0;
+  for (let i = 0; i < ctx.boot.n; i++) {
+    if (Date.now() - t0 > BOOT_TIME_LIMIT) break;
+    const valid = [];
+    Object.keys(poPlci).forEach(p => {
+      const list = poPlci[p];
+      for (let j = 0; j < list.length; j++) {
+        const rows = list[Math.floor(rand() * list.length)];
+        // kopia z dopiskiem numeru losowania — wylosowany kilka razy zawodnik to osobne „osoby” (osobna waga startu)
+        rows.forEach(r => { const x = r.slice(); x[W.zawodnik - 1] = r[W.zawodnik - 1] + ' #' + j; valid.push(x); });
+      }
+    });
+    collect(weightClassAnalysis_(Object.assign({}, ctx, { valid: valid })));
+    done++;
+  }
+
+  const ci = arr => {
+    const s = arr.slice().sort((a, b) => a - b);
+    return { lo: quantile_(s, 0.025), hi: quantile_(s, 0.975), n: s.length,
+      p: s.length ? Math.min(1, 2 * Math.min(s.filter(v => v <= 0).length, s.filter(v => v >= 0).length) / s.length) : '' };
+  };
+  const tables = {};
+  tablesDef.forEach(([t, list]) => {
+    tables[t] = list.filter(g => g.k && g.algos.length).map(g => {
+      const a = acc[t + '§' + g.key];
+      return { key: g.key, n: g.n, k: g.k, bOfic: g.bOfic, bNeutral: g.bNeutral, bnCI: ci(a.bn),
+        ofic: g.algos[2].rho, oficCI: ci(a.ofic), sch: g.algos[6] ? g.algos[6].rho : '', schCI: ci(a.sch) };
+    });
+  });
+  return { tables: tables, done: done, requested: ctx.boot.n, ms: Date.now() - t0,
+    osoby: PLCIE.map(p => p + ': ' + ((poPlci[p] || []).length)).join(', ') };
+}
+
+/** Zakładka „Bootstrap”: 4 tabele (klasa × bój, płeć × bój, klasa × typ, płeć × typ). */
+function writeBootstrap_(ss, ctx, res) {
+  let sh = ss.getSheetByName(SHEET_BOOTSTRAP);
+  if (sh) {
+    sh.clear();
+    sh.clearNotes();
+    sh.setConditionalFormatRules([]);
+  } else {
+    sh = ss.insertSheet(SHEET_BOOTSTRAP);
+  }
+  const all = Object.keys(res.tables).reduce((s, k) => s + res.tables[k].length, 0);
+  const need = 40 + all;
+  if (sh.getMaxRows() < need) sh.insertRowsAfter(sh.getMaxRows(), need - sh.getMaxRows());
+  if (sh.getMaxColumns() < 20) sh.insertColumnsAfter(sh.getMaxColumns(), 20 - sh.getMaxColumns());
+  sh.getRange(1, 1, sh.getMaxRows(), 20).setFontFamily(STYLE.font).setFontSize(10);
+
+  const sch = ctx.schematB || schematBFromValues_(null);
+  const granice = PLCIE.map(p => p + ': ' + (ctx.klasySym[p].length ? ctx.klasySym[p].map(fmt2_).join(' / ') : 'brak')).join(', ');
+  const schemat = PLCIE.map(p => p + ': ' + simClassLabels_(p, ctx.klasySym[p])
+    .map((cl, i) => typeof sch[p][i] === 'number' ? fmt2_(sch[p][i]) : 'ofic.').join(' / ')).join(', ');
+  sh.getRange('A1').setValue('Bootstrap po zawodnikach — 95% przedziały ufności').setFontSize(14).setFontWeight('bold');
+  sh.getRange('A2').setValue('Symulacja klas (sekcja H): ' + granice + ' | schemat b: ' + schemat
+    + ' | zawody = ' + ctx.filtrZawody + powtorzeniaInfo_(ctx, ctx.powtorzenia ? ctx.powtorzenia.pominietoValid : 0)
+    + ' | wartości skrajne: ' + (ctx.skrajne.on ? ctx.skrajne.metoda + ', próg ' + fmt2_(ctx.skrajne.prog) : 'nie odrzucane'))
+    .setFontWeight('bold');
+  sh.getRange('A3').setValue('Obliczono: ' + Utilities.formatDate(new Date(), 'Europe/Warsaw', 'yyyy-MM-dd HH:mm')
+    + ' | powtórzeń: ' + res.done + ' z ' + res.requested + (res.done < res.requested ? ' (limit czasu)' : '')
+    + ' | ziarno: ' + ctx.boot.seed + ' | czas: ' + Math.round(res.ms / 1000) + ' s | zawodników (losowanych): ' + res.osoby)
+    .setFontColor(res.done < res.requested ? '#C00000' : STYLE.noteFont);
+  writeStaleCheck_(sh, 'A4', '📊 Analiza → Bootstrap (przedziały ufności)',
+    '&"|"&IFERROR(TEXTJOIN(";";FALSE;KLASY_SYM);"")&"|"&IFERROR(TEXTJOIN(";";FALSE;KLASY_SYM_B);"")'
+    + '&"|"&IFERROR(BOOT_N&"/"&BOOT_SEED;"")');
+
+  const head = ['Grupa', 'n', 'b oficjalny', 'b neutralne', '95% CI b neutralnego', 'b ofic. w CI?',
+    'ρ ofic.', '95% CI ρ ofic.', 'p (ofic.)', 'ρ schemat', '95% CI ρ schemat', 'p (schemat)'];
+  const fmtB = v => typeof v !== 'number' ? String(v) : (v === Infinity ? '> ' + fmt2_(B_SCAN.max)
+    : v === -Infinity ? '< ' + fmt2_(B_SCAN.min) : fmt2_(v));
+  const inCI = (b, c) => typeof b !== 'number' || c.lo === '' ? '' : (b >= c.lo && b <= c.hi ? 'TAK' : 'NIE');
+  let row = 6;
+  [
+    ['klasaBoj', '1. Klasa × bój'],
+    ['plecBoj', '2. Płeć × bój (klasy uśrednione)'],
+    ['klasaTyp', '3. Klasa × typ boju (średnio z bojów)'],
+    ['plecTyp', '4. Płeć × typ boju (średnio z bojów i klas)'],
+  ].forEach(([t, title]) => {
+    sh.getRange(row, 1).setValue(title).setFontWeight('bold');
+    styleHeader_(sh.getRange(row + 1, 1, 1, head.length).setValues([head]).setWrap(true));
+    sh.setRowHeight(row + 1, 36);
+    const list = res.tables[t];
+    if (!list.length) {
+      sh.getRange(row + 2, 1).setValue('Brak danych.').setFontStyle('italic');
+      row += 4;
+      return;
+    }
+    const out = list.map(g => [g.key, g.n, g.bOfic, g.bNeutral,
+      g.bnCI.lo === '' ? '' : fmtB(g.bnCI.lo) + ' … ' + fmtB(g.bnCI.hi), inCI(g.bOfic, g.bnCI),
+      g.ofic, g.oficCI.lo === '' ? '' : fmt3_(g.oficCI.lo) + ' … ' + fmt3_(g.oficCI.hi), g.oficCI.p,
+      g.sch, g.schCI.lo === '' ? '' : fmt3_(g.schCI.lo) + ' … ' + fmt3_(g.schCI.hi), g.schCI.p]);
+    const r0 = row + 2;
+    const rng = sh.getRange(r0, 1, out.length, head.length).setValues(out);
+    rng.setBorder(true, true, true, true, true, true, '#BFBFBF', SpreadsheetApp.BorderStyle.SOLID);
+    sh.getRange(r0, 2, out.length, head.length - 1).setHorizontalAlignment('center');
+    sh.getRange(r0, 1, out.length, 1).setFontWeight('bold');
+    sh.getRange(r0, 3, out.length, 2).setNumberFormat('0.00');
+    sh.getRange(r0, 4, out.length, 1).setFontWeight('bold').setBackground('#FFF2CC');
+    sh.getRange(r0, 7, out.length, 1).setNumberFormat('0.000');
+    sh.getRange(r0, 9, out.length, 2).setNumberFormat('0.000');
+    sh.getRange(r0, 12, out.length, 1).setNumberFormat('0.000');
+    sh.getRange(r0, 7, out.length, 1).setBackgrounds(out.map(r => [typeof r[6] === 'number' ? divergingColor_(r[6]) : null]));
+    sh.getRange(r0, 10, out.length, 1).setBackgrounds(out.map(r => [typeof r[9] === 'number' ? divergingColor_(r[9]) : null]));
+    sh.getRange(r0, 6, out.length, 1).setFontColors(out.map(r => [r[5] === 'NIE' ? '#C00000' : (r[5] === 'TAK' ? '#38761D' : null)]))
+      .setFontWeights(out.map(r => [r[5] ? 'bold' : null]));
+    [9, 12].forEach(c => sh.getRange(r0, c, out.length, 1)
+      .setFontColors(out.map(r => [typeof r[c - 1] === 'number' && r[c - 1] < 0.05 ? '#C00000' : null]))
+      .setFontWeights(out.map(r => [typeof r[c - 1] === 'number' && r[c - 1] < 0.05 ? 'bold' : null])));
+    for (let i = 1; i < out.length; i++) {
+      if (String(out[i][0]).split(' | ')[0] !== String(out[i - 1][0]).split(' | ')[0]) {
+        sh.getRange(r0 + i, 1, 1, head.length).setBorder(true, null, null, null, null, null, '#1F3A5F', SpreadsheetApp.BorderStyle.SOLID_MEDIUM);
+      }
+    }
+    row = r0 + out.length + 2;
+  });
+
+  [
+    'Bootstrap: losowanie zawodników ze zwracaniem (osobno K i M), wylosowany zawodnik wnosi wszystkie swoje wyniki (boje i lata); w każdym powtórzeniu cała symulacja klas liczona od nowa, z filtrem wartości skrajnych.',
+    '95% CI = percentyle 2,5% i 97,5% z powtórzeń. p (bootstrap) = 2 × mniejsza z części powtórzeń z ρ ≤ 0 i ρ ≥ 0 — czy ρ różni się od 0.',
+    'b ofic. w CI?: TAK = oficjalny współczynnik jest zgodny z danymi (mieści się w przedziale b neutralnego); NIE (czerwone) = dane wskazują inne b.',
+    'n i b neutralne — z prawdziwych danych (jak w Korelacjach (wagi)); „< −1,00” / „> 2,00” = b neutralne poza zakresem szukania.',
+    'Tabele 3–4: p i CI uwzględniają, że ci sami zawodnicy występują w kilku bojach (w Korelacjach (wagi) są tam puste).',
+  ].forEach((t, i) => sh.getRange(row + i, 1).setValue(t).setFontStyle('italic').setFontColor(STYLE.noteFont));
+
+  [180, 55, 75, 85, 140, 75, 65, 120, 65, 75, 120, 75].forEach((w, i) => sh.setColumnWidth(i + 1, w));
+  sh.setFrozenColumns(1);
+  orderSheets_(ss);
+  ss.setActiveSheet(sh);
+}
+
 /** Etykiety klas wagowych dla płci, np. K → ['K 65', 'K +65']. */
 function klasyDlaPlci_(plec) {
   const lim = KLASY_WAGOWE[plec];
@@ -439,7 +652,7 @@ function klasyDlaPlci_(plec) {
 }
 
 /** Statystyki jednej kategorii: r i ρ dla każdego algorytmu, b z regresji, b neutralne. */
-function makeStratum_(rows, meta, algos) {
+function makeStratum_(rows, meta, algos, noNeutral) {
   const A = algos || ALGOS;
   const rec = Object.assign({ n: rows.length, r: [], rho: [], loglog: '', bNeutral: '' }, meta);
   if (rows.length < MIN_N) return rec;
@@ -450,7 +663,7 @@ function makeStratum_(rows, meta, algos) {
   rec.loglog = slope_(w.map(Math.log), c.map(Math.log));
   rec.w = w;
   rec.c = c;
-  rec.bNeutral = neutralB_([rec]);
+  rec.bNeutral = noNeutral ? '' : neutralB_([rec]);   // noNeutral: liczone później w poolStrata_ (oszczędność czasu)
   return rec;
 }
 
@@ -486,7 +699,7 @@ function poolStrata_(st, algos) {
 const SPEARMAN_VAR = 1.06;
 
 /** Zakres i krok szukania b neutralnego. */
-const B_SCAN = { min: -1, max: 2, step: 0.01 };
+const B_SCAN = { min: -1, max: 2, coarse: 0.1 };
 
 /**
  * b, przy którym uśrednione ρ(waga, ciężar / waga^b) = 0 w podanych kategoriach (interpolacja liniowa).
@@ -497,14 +710,21 @@ function neutralB_(strata) {
   const rhoAt = b => fisherPool_(strata.map(x => ({
     r: spearman_(x.w, x.c.map((c, j) => c / Math.pow(x.w[j], b))), n: x.n,
   })), SPEARMAN_VAR).r;
+  // siatka co B_SCAN.coarse, a po zmianie znaku bisekcja (zgodne ze skanem co 0,01 z dokładnością < 0,01; ~8× szybciej)
   let prevB = B_SCAN.min, prev = rhoAt(prevB);
   if (prev === '') return '';
-  for (let b = B_SCAN.min + B_SCAN.step; b <= B_SCAN.max + 1e-9; b += B_SCAN.step) {
+  for (let b = B_SCAN.min + B_SCAN.coarse; b <= B_SCAN.max + 1e-9; b += B_SCAN.coarse) {
     const cur = rhoAt(b);
     if (cur === '') return '';
     if (prev === 0) return prevB;
     if ((prev > 0 && cur <= 0) || (prev < 0 && cur >= 0)) {
-      return prevB + (b - prevB) * prev / (prev - cur);
+      let lo = prevB, hi = b, flo = prev, fhi = cur;
+      for (let i = 0; i < 6; i++) {
+        const m = (lo + hi) / 2, fm = rhoAt(m);
+        if (fm === '') break;
+        if ((flo > 0 && fm > 0) || (flo < 0 && fm < 0)) { lo = m; flo = fm; } else { hi = m; fhi = fm; }
+      }
+      return flo === fhi ? (lo + hi) / 2 : lo + (hi - lo) * flo / (flo - fhi);
     }
     prevB = b;
     prev = cur;
@@ -833,6 +1053,10 @@ function analysisContext_(ss) {
     boje: { wybrane: bojeWybrane, wszystkich: boje.filter(b => b).length },
     typBoju: typBoju,
     klasySym: klasySymFromValues_(namedRange_(ss, 'KLASY_SYM') ? namedRange_(ss, 'KLASY_SYM').getValues() : null),
+    boot: {
+      n: Math.max(20, Math.min(1000, Math.round(Number(opt('BOOT_N', BOOTSTRAP_START.n)) || BOOTSTRAP_START.n))),
+      seed: Math.round(Number(opt('BOOT_SEED', BOOTSTRAP_START.seed)) || BOOTSTRAP_START.seed),
+    },
     schematB: schematBFromValues_(namedRange_(ss, 'KLASY_SYM_B') ? namedRange_(ss, 'KLASY_SYM_B').getValues() : null),
     filtrZawody: val('FILTR_ZAWODY'),
     filtrKategoria: val('FILTR_KATEGORIA'),

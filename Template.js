@@ -12,7 +12,7 @@ const SHEET_DANE = 'Dane';
 const SHEET_WYNIKI = 'Wyniki';
 
 /** Kolejność zakładek w arkuszu (pozostałe zakładki trafiają za nimi). */
-const SHEET_ORDER = [SHEET_USTAWIENIA, SHEET_DANE, SHEET_WYNIKI, 'Korelacje', 'Korelacje (kategorie)', 'Korelacje (wagi)', 'Odrzucone'];
+const SHEET_ORDER = [SHEET_USTAWIENIA, SHEET_DANE, SHEET_WYNIKI, 'Korelacje', 'Korelacje (kategorie)', 'Korelacje (wagi)', 'Bootstrap', 'Odrzucone'];
 
 /** Zakres wierszy obejmowany formułami zakładek wyliczanych (wiersze Danych 2…MAX_ROWS). */
 const MAX_ROWS = 5000;
@@ -103,7 +103,9 @@ const U_ROWS = (() => {
            gHead: dHead + 13, gPowt: dHead + 14,
            hHead: dHead + 16, hCols: dHead + 17, hFirst: dHead + 18, hLast: dHead + 17 + KLASY_SYM_GRANICE,
            hbCols: dHead + 19 + KLASY_SYM_GRANICE, hbFirst: dHead + 20 + KLASY_SYM_GRANICE,
-           hbLast: dHead + 20 + 2 * KLASY_SYM_GRANICE };
+           hbLast: dHead + 20 + 2 * KLASY_SYM_GRANICE,
+           iHead: dHead + 22 + 2 * KLASY_SYM_GRANICE, iN: dHead + 23 + 2 * KLASY_SYM_GRANICE,
+           iSeed: dHead + 24 + 2 * KLASY_SYM_GRANICE };
 })();
 
 /** Adresy komórek w Ustawieniach. */
@@ -125,6 +127,8 @@ const U = {
   powtorzenia:    'B' + U_ROWS.gPowt,
   klasySym:       'B' + U_ROWS.hFirst + ':C' + U_ROWS.hLast,
   klasySymB:      'B' + U_ROWS.hbFirst + ':C' + U_ROWS.hbLast,
+  bootN:          'B' + U_ROWS.iN,
+  bootSeed:       'B' + U_ROWS.iSeed,
   listaZawodow:   'F5:F200',
   listaKategorii: 'G5:G200',
 };
@@ -149,6 +153,8 @@ const NAMED_RANGES = {
   POWTORZENIA:      U.powtorzenia,
   KLASY_SYM:        U.klasySym,
   KLASY_SYM_B:      U.klasySymB,
+  BOOT_N:           U.bootN,
+  BOOT_SEED:        U.bootSeed,
 };
 
 // ---------------------------------------------------------------- Menu i Inicjalizacja
@@ -167,6 +173,8 @@ function onOpen() {
     .addItem('Oblicz korelacje', 'computeCorrelations')
     .addItem('Oblicz korelacje w kategoriach', 'computeCorrelationsByCategory')
     .addItem('Oblicz korelacje w klasach (symulacja)', 'computeCorrelationsByWeightClass')
+    .addSeparator()
+    .addItem('Bootstrap (przedziały ufności)', 'computeBootstrap')
     .addToUi();
 }
 
@@ -185,6 +193,7 @@ function setupTemplate() {
   const addedHb = ensureSchematB_(ss);
   const addedAnalizuj = ensureKolumnaAnalizuj_(ss);
   const addedTyp = ensureKolumnaTyp_(ss);
+  const addedI = ensureSekcjaBootstrap_(ss);
   const fixedNames = ensureNamedRanges_(ss);
   applyDaneRules_(ss);
   buildWyniki_(ss);
@@ -200,6 +209,7 @@ function setupTemplate() {
     + (addedHb ? ' Dodano w sekcji H współczynniki schematu (b dla każdej klasy).' : '')
     + (addedAnalizuj ? ' Dodano w Ustawieniach kolumnę „Analizuj” przy bojach (sekcja B).' : '')
     + (addedTyp ? ' Dodano w Ustawieniach kolumnę „Typ” przy bojach (sekcja B).' : '')
+    + (addedI ? ' Dodano w Ustawieniach sekcję I (bootstrap).' : '')
     + (fixedNames.length ? ' Naprawiono zakresy nazwane: ' + fixedNames.join(', ') + '.' : '')
     + ' Walidacja Danych zaktualizowana. Zbudowano: ' + SHEET_WYNIKI + '.';
   ss.toast(msg, 'Inicjalizacja zakończona', 6);
@@ -363,6 +373,9 @@ function ensureUstawienia_(ss) {
 
   // H. Symulacja klas wagowych
   writeSekcjaKlasySym_(sh);
+
+  // I. Bootstrap
+  writeSekcjaBootstrap_(sh);
 
   // Szerokości kolumn
   [[1, 170], [2, 110], [3, 110], [4, 70], [5, 110], [6, 190], [7, 220]]
@@ -613,6 +626,41 @@ function ensureKolumnaAnalizuj_(ss) {
   if (!sh || namedRange_(ss, 'B_ANALIZUJ')) return false;
   if (String(sh.getRange('D' + U_ROWS.bCols).getValue()).trim() !== '') return false;
   writeKolumnaAnalizuj_(sh);
+  return true;
+}
+
+/** Bootstrap (sekcja I): wartości startowe liczby powtórzeń i ziarna losowania. */
+const BOOTSTRAP_START = { n: 200, seed: 1 };
+
+/** Sekcja I Ustawień — bootstrap po zawodnikach (📊 Analiza → Bootstrap): liczba powtórzeń i ziarno losowania. */
+function writeSekcjaBootstrap_(sh) {
+  const R = U_ROWS;
+  const ss = sh.getParent();
+  styleSection_(sh.getRange('A' + R.iHead + ':C' + R.iHead), 'I. Bootstrap');
+  sh.getRange('A' + R.iN + ':A' + R.iSeed).setValues([['Liczba powtórzeń'], ['Ziarno losowania']]).setFontWeight('bold');
+  styleInput_(sh.getRange(U.bootN + ':' + U.bootSeed).setValues([[BOOTSTRAP_START.n], [BOOTSTRAP_START.seed]])).setNumberFormat('0');
+  sh.getRange(U.bootN).setDataValidation(SpreadsheetApp.newDataValidation()
+    .requireNumberBetween(20, 1000).setAllowInvalid(false).setHelpText('Liczba od 20 do 1000 (zalecane 200)').build());
+  sh.getRange(U.bootSeed).setDataValidation(SpreadsheetApp.newDataValidation()
+    .requireNumberBetween(1, 999999).setAllowInvalid(false).setHelpText('Liczba całkowita 1–999999').build());
+  sh.getRange('A' + R.iHead).setNote(
+    '📊 Analiza → Bootstrap (przedziały ufności) — zakładka „Bootstrap”.\n\n'
+    + 'Losuje zawodników ze zwracaniem (osobno K i M; wylosowany zawodnik wnosi wszystkie swoje wyniki — boje i lata) '
+    + 'i w każdym powtórzeniu liczy od nowa symulację klas (sekcja H). Z rozrzutu wyników: 95% przedziały ufności dla b neutralnego i ρ.\n\n'
+    + 'Więcej powtórzeń = dokładniej, ale dłużej (200 ≈ 2–4 min). Limit Apps Script to 6 min — skrypt kończy wcześniej i pisze, ile powtórzeń wykonał.\n'
+    + 'To samo ziarno = te same wyniki przy każdym kliknięciu.');
+  sh.getRange('C' + R.iN).setValue('200 ≈ 2–4 min').setFontStyle('italic').setFontColor(STYLE.noteFont);
+  sh.getRange('C' + R.iSeed).setValue('te same = te same wyniki').setFontStyle('italic').setFontColor(STYLE.noteFont);
+  setNamedRange_(ss, 'BOOT_N', sh.getRange(U.bootN));
+  setNamedRange_(ss, 'BOOT_SEED', sh.getRange(U.bootSeed));
+}
+
+/** Dopisuje sekcję I do istniejących Ustawień, jeśli jej brak (komórka nagłówka pusta). @return {boolean} */
+function ensureSekcjaBootstrap_(ss) {
+  const sh = ss.getSheetByName(SHEET_USTAWIENIA);
+  if (!sh || namedRange_(ss, 'BOOT_N')) return false;
+  if (String(sh.getRange('A' + U_ROWS.iHead).getValue()).trim() !== '') return false;
+  writeSekcjaBootstrap_(sh);
   return true;
 }
 

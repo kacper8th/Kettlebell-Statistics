@@ -7,12 +7,13 @@
  *   node tools/test_analiza.js [--dane dane] [--zawody "MP 2026 Bochnia"] [--kategoria "AMATOR KOBIET +65 KG"]
  *                              [--podzial 0|1|2] [--skrajne MAD:3|SD:3|off] [--testy 0.5,0.67,0.75]
  *                              [--powtorzenia wszystkie|najnowszy] [--klasy "K:58,65,72;M:75,85,95"]
- *                              [--boje "TGU,SSP,2KBSQ"] [--schemat "K:,0.25;M:,0"]
+ *                              [--boje "TGU,SSP,2KBSQ"] [--schemat "K:,0.25;M:,0"] [--bootstrap 200 [--ziarno 1]]
  *
  *   --podzial: 0 = Klasa wagowa (domyślnie), 1 = Klasa wagowa × poziom, 2 = Zawody × kategoria
  *   --powtorzenia: wszystkie starty (domyślnie) albo tylko najnowszy start zawodnika w każdym boju (Ustawienia, sekcja G)
  *   --klasy: granice symulacji klas wagowych (Ustawienia, sekcja H), do 3 na płeć; domyślnie "K:65;M:85"
  *   --schemat: b dla klas symulacji (klasa 1 = najlżejsza; puste = b oficjalny), algorytm „Schemat” w Korelacje (wagi)
+ *   --bootstrap: liczba powtórzeń bootstrapu po zawodnikach (zakładka Bootstrap); bez parametru bootstrap się nie liczy
  *   --boje: boje do analizy (Ustawienia, sekcja B, kolumna „Analizuj”); domyślnie wszystkie
  *
  * Co robi:
@@ -129,6 +130,7 @@ const ctx = {
   filtrZawody: filtrZawody, filtrKategoria: filtrKategoria, tests: testy,
   klasySym: klasySymFromValues_(klasyVals),
   schematB: schematBFromValues_(schematVals),
+  boot: { n: Number(opt('bootstrap', '0')) || 200, seed: Number(opt('ziarno', '1')) },
   typBoju: B_OFICJALNE_START.reduce((o, r) => { o[r[0]] = typBojuStart_(r[0]); return o; }, {}),
   boje: { wybrane: B_OFICJALNE_START.map(r => r[0]).filter(b => bojeWybrane.indexOf(b) >= 0), wszystkich: B_OFICJALNE_START.length },
 };
@@ -176,3 +178,18 @@ const odrz = (title, list) => {
 };
 odrz('Korelacje (kategorie)', kat.rej || []);
 odrz('Korelacje (wagi)', wag.rejectedList || []);
+
+// --- bootstrap (tylko z --bootstrap N)
+if (opt('bootstrap', '')) {
+  let boot;
+  writeBootstrap_ = (ss, c, r) => { boot = r; };
+  computeBootstrap();
+  const fB = v => typeof v === 'number' ? (isFinite(v) ? v.toFixed(2) : (v > 0 ? '>2' : '<-1')) : String(v);
+  const ciT = c => c.lo === '' ? '' : `${fB(c.lo)} … ${fB(c.hi)}`;
+  console.log(`\n== Bootstrap — ${boot.done} z ${boot.requested} powtórzeń, ${(boot.ms / 1000).toFixed(1)} s, ziarno ${ctx.boot.seed} | ${boot.osoby}`);
+  [['klasaBoj', 'klasa × bój'], ['plecBoj', 'płeć × bój'], ['klasaTyp', 'klasa × typ'], ['plecTyp', 'płeć × typ']].forEach(([t, title]) => {
+    console.log('  -- ' + title);
+    boot.tables[t].forEach(g => console.log(`  ${g.key.padEnd(30)} b ofic ${fB(g.bOfic)}  b neutr ${fB(g.bNeutral).padStart(6)}  CI ${ciT(g.bnCI).padEnd(14)}`
+      + `  ρ ofic ${f3(g.ofic)} CI ${ciT(g.oficCI)} p ${f2(g.oficCI.p)}` + (g.sch !== '' ? `  ρ sch ${f3(g.sch)} p ${f2(g.schCI.p)}` : '')));
+  });
+}
