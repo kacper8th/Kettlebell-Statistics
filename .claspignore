@@ -1,0 +1,6 @@
+# clasp wysyła do Google tylko pliki Apps Script z głównego folderu.
+# tools/ (Python, Node) i dane/ (CSV) zostają tylko w repo.
+**/**
+!appsscript.json
+!*.js
+!*.html
