@@ -32,6 +32,7 @@ wynik = ciężar / waga_zawodnika ^ b
 
 - **⚙️ Setup → Inicjalizacja** — buduje / naprawia strukturę (bezpieczne do wielokrotnego uruchamiania)
 - **📥 Dane → Importuj CSV**, **Policz wagi**
+- **📊 Analiza → Porównanie 0 / x / 1** — b = 0 / b oficjalne / b = 1 w prawdziwych grupach rywalizacji: korelacja z wagą, percentyl lekkiej i ciężkiej tercji, opłacalność zbijania (−1 kg)
 - **📊 Analiza → Oblicz korelacje**, **Oblicz korelacje w kategoriach**, **Oblicz korelacje w klasach (symulacja)** (granice klas i schemat b w Ustawieniach, sekcja H); w sekcji B: „Analizuj” i „Typ” boju (średnie dla bojów siłowych / wydolnościowych)
 - **📊 Analiza → Bootstrap (przedziały ufności)** — losowanie zawodników ze zwracaniem, 95% CI dla b neutralnego i ρ (Ustawienia, sekcja I: liczba powtórzeń, ziarno)
 - Ustawienia, sekcja J: **miara główna** — r Pearsona (wartości, domyślnie) albo ρ Spearmana (miejsca)

@@ -10,6 +10,7 @@ const SHEET_KOR_KAT = 'Korelacje (kategorie)';
 const SHEET_KOR_WAGI = 'Korelacje (wagi)';
 const SHEET_BOOTSTRAP = 'Bootstrap';
 const SHEET_WYKRES = 'Wykres ρ(b)';
+const SHEET_POROWNANIE = 'Porównanie 0 / x / 1';
 
 /** Kolumny zakładki Wyniki (1 = A) — muszą odpowiadać WYNIKI_COLUMNS w Template.js. */
 const W = { zawody: 1, kategoria: 2, boj: 3, plec: 4, zawodnik: 5, wynik: 6, waga: 7, ciezar: 8, bOfic: 9,
@@ -464,6 +465,243 @@ function writeTypeTables_(sh, ctx, top, num, typeRes, algoTitle, labelHeader, al
   row = writeSummaryTable_(sh, ctx, row + 2, (num + 1) + '. Średnio z bojów — płeć × typ boju (wszystkie klasy)',
     'Płeć | typ boju', typeRes.plcie, algoTitle, true, algos, 'bojów');
   return row;
+}
+
+// ---------------------------------------------------------------- Porównanie 0 / x / 1
+
+/** Trzy porównywane podejścia: siła absolutna, współczynnik oficjalny, siła względna. */
+const POROWNANIE_ALGOS = [
+  { label: 'b = 0', b: r => 0 },
+  { label: 'b ofic. (x)', b: r => Number(r[W.bOfic - 1]) },
+  { label: 'b = 1', b: r => 1 },
+];
+
+/** Ile kg mniej w mierze „opłacalność zbijania”. */
+const POROWNANIE_DW = 1;
+
+/**
+ * 📊 Analiza → Porównanie 0 / x / 1
+ * W prawdziwych grupach rywalizacji (zawody × kategoria × bój): 1) korelacja wyniku z wagą (miara główna),
+ * 2) średni percentyl najlżejszej i najcięższej tercji, 4) zmiana percentyla, gdyby zawodnik ważył 1 kg mniej.
+ */
+function computeComparison() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ctx = analysisContext_(ss);
+  if (!ctx) return;
+  const res = comparisonAnalysis_(ctx);
+  writePorownanie_(ss, ctx, res);
+  ss.toast('Porównanie 0 / x / 1: ' + res.grup + ' grup rywalizacji, ' + res.n + ' wyników.', '📊 Analiza', 5);
+}
+
+/** Percentyl wartości v wśród innych (0 = najgorszy, 1 = najlepszy; remis = połowa). */
+function pctAmong_(v, others) {
+  if (!others.length) return '';
+  let less = 0, eq = 0;
+  others.forEach(o => { if (o < v) less++; else if (o === v) eq++; });
+  return (less + 0.5 * eq) / others.length;
+}
+
+/**
+ * Obliczenia porównania. Grupa rywalizacji = zawody × kategoria × bój (AMATOR i PRO osobno, jak na zawodach),
+ * z filtrem wartości skrajnych w grupie (jak przy podziale „Zawody × kategoria”). Klasa z nazwy kategorii;
+ * kategoria bez klasy (PRO KOBIET, PP 2024 — otwarta) liczona jako klasa „+”.
+ * @return {{klasaTyp, plecTyp, klasaBoj, grup, n}}
+ */
+function comparisonAnalysis_(ctx) {
+  const wybrane = {};
+  ctx.groups.forEach(g => { wybrane[g.boj + '|' + g.plec] = true; });
+  const grupy = {};
+  ctx.valid.forEach(r => {
+    if (!wybrane[r[W.boj - 1] + '|' + r[W.plec - 1]]) return;
+    const k = r[W.zawody - 1] + '|' + r[W.kategoria - 1] + '|' + r[W.boj - 1];
+    (grupy[k] = grupy[k] || []).push(r);
+  });
+  const klasaGrupy = rows => {
+    const plec = rows[0][W.plec - 1], kat = String(rows[0][W.kategoria - 1]);
+    const m = kat.match(/(\+?)\s*(\d+)\s*KG/i);
+    const lim = KLASY_WAGOWE[plec] || 0;
+    return plec + ' ' + (m ? (m[1] ? '+' : '') + m[2] : '+' + lim);
+  };
+  const score = (r, b, dw) => {
+    const w = Number(r[W.waga - 1]) - dw;
+    const c = isPullUp_(r[W.boj - 1]) ? w + Number(r[W.wynik - 1]) : Number(r[W.ciezar - 1]);
+    return c / Math.pow(w, b);
+  };
+  const agg = {};
+  const acc = (key, meta) => agg[key] = agg[key] || Object.assign({ key: key, grupy: [], n: 0,
+    a: POROWNANIE_ALGOS.map(() => ({ corr: [], light: [], heavy: [], gain: [] })) }, meta);
+  let nGrup = 0, nAll = 0;
+
+  Object.keys(grupy).forEach(k => {
+    let rows = grupy[k];
+    if (ctx.skrajne.on && rows.length >= MIN_N) rows = filterOutliers_(rows, ctx.skrajne).kept;
+    if (rows.length < MIN_N) return;
+    nGrup++;
+    nAll += rows.length;
+    const n = rows.length, boj = rows[0][W.boj - 1], plec = rows[0][W.plec - 1];
+    const klasa = klasaGrupy(rows), typ = ctx.typBoju[boj];
+    const typTxt = typ === TYPY_BOJOW[0] ? 'siłowe' : 'wydolnościowe';
+    const keys = [
+      ['klasaBoj', klasa + ' | ' + boj], ['klasaTyp', klasa + ' | ' + typTxt], ['plecTyp', plec + ' (wszystkie klasy) | ' + typTxt],
+    ].map(([t, key]) => acc(t + '§' + key, { tabela: t, label: key, klasa: klasa, plec: plec, boj: boj, typ: typ }));
+    // tercje wg wagi
+    const order = rows.map((r, i) => i).sort((i, j) => Number(rows[i][W.waga - 1]) - Number(rows[j][W.waga - 1]));
+    const t = Math.floor(n / 3);
+    const lekcy = order.slice(0, t), ciezcy = order.slice(n - t);
+    const w = rows.map(r => Number(r[W.waga - 1]));
+    POROWNANIE_ALGOS.forEach((alg, ai) => {
+      const s = rows.map(r => score(r, alg.b(r), 0));
+      const corr = corrMain_(w, s);
+      const pct = s.map((v, i) => pctAmong_(v, s.filter((_, j) => j !== i)));
+      const gain = rows.map((r, i) => pctAmong_(score(r, alg.b(r), POROWNANIE_DW), s.filter((_, j) => j !== i)) - pct[i]);
+      keys.forEach(x => {
+        const A = x.a[ai];
+        if (corr !== '') A.corr.push({ r: corr, n: n });
+        lekcy.forEach(i => A.light.push(pct[i]));
+        ciezcy.forEach(i => A.heavy.push(pct[i]));
+        gain.forEach(g => A.gain.push(g));
+      });
+    });
+    keys.forEach(x => { x.grupy.push(k); x.n += n; });
+  });
+
+  const mean = a => a.length ? a.reduce((s, v) => s + v, 0) / a.length : '';
+  const finish = (x, withP) => {
+    const algos = x.a.map(A => {
+      const f = fisherPool_(A.corr, varMain_());
+      return { r: f.r, p: withP ? f.p : '', light: mean(A.light), heavy: mean(A.heavy), gain: A.gain.length ? 100 * mean(A.gain) : '' };
+    });
+    let best = 0;
+    algos.forEach((a, i) => { if (Math.abs(a.r) < Math.abs(algos[best].r)) best = i; });
+    return { key: x.label, grup: x.grupy.length, n: x.n, algos: algos, closest: POROWNANIE_ALGOS[best].label };
+  };
+  const klasyOrder = PLCIE.reduce((a, p) => a.concat(klasyDlaPlci_(p)), []);
+  const bojOrder = ctx.groups.map(g => g.boj);
+  const list = t => Object.keys(agg).filter(k => agg[k].tabela === t).map(k => agg[k]);
+  const sortKlasa = (a, b) => klasyOrder.indexOf(a.klasa) - klasyOrder.indexOf(b.klasa);
+  const sortTyp = (a, b) => TYPY_BOJOW.indexOf(a.typ) - TYPY_BOJOW.indexOf(b.typ);
+  return {
+    klasaTyp: list('klasaTyp').sort((a, b) => sortKlasa(a, b) || sortTyp(a, b)).map(x => finish(x, false)),
+    plecTyp: list('plecTyp').sort((a, b) => PLCIE.indexOf(a.plec) - PLCIE.indexOf(b.plec) || sortTyp(a, b)).map(x => finish(x, false)),
+    klasaBoj: list('klasaBoj').sort((a, b) => sortKlasa(a, b) || bojOrder.indexOf(a.boj) - bojOrder.indexOf(b.boj)).map(x => finish(x, true)),
+    grup: nGrup, n: nAll,
+  };
+}
+
+/** Zakładka „Porównanie 0 / x / 1”: klasa × typ (+ płeć), klasa × bój. */
+function writePorownanie_(ss, ctx, res) {
+  let sh = ss.getSheetByName(SHEET_POROWNANIE);
+  if (sh) {
+    sh.clear();
+    sh.clearNotes();
+    sh.setConditionalFormatRules([]);
+    sh.getRange(1, 1, sh.getMaxRows(), sh.getMaxColumns()).breakApart();
+  } else {
+    sh = ss.insertSheet(SHEET_POROWNANIE);
+  }
+  const need = 40 + res.klasaTyp.length + res.plecTyp.length + res.klasaBoj.length;
+  if (sh.getMaxRows() < need) sh.insertRowsAfter(sh.getMaxRows(), need - sh.getMaxRows());
+  if (sh.getMaxColumns() < 25) sh.insertColumnsAfter(sh.getMaxColumns(), 25 - sh.getMaxColumns());
+  sh.getRange(1, 1, sh.getMaxRows(), 25).setFontFamily(STYLE.font).setFontSize(10);
+
+  sh.getRange('A1').setValue('Porównanie podejść: b = 0 (siła absolutna) / b oficjalne / b = 1 (siła względna)').setFontSize(14).setFontWeight('bold');
+  sh.getRange('A2').setValue('Grupy rywalizacji: zawody × kategoria × bój (AMATOR i PRO osobno) | zawody = ' + ctx.filtrZawody
+    + powtorzeniaInfo_(ctx, ctx.powtorzenia ? ctx.powtorzenia.pominietoValid : 0)
+    + ' | wartości skrajne: ' + (ctx.skrajne.on ? 'odrzucane w każdej grupie (' + ctx.skrajne.metoda + ', próg ' + fmt2_(ctx.skrajne.prog) + ')' : 'nie odrzucane')
+    + ' | grup: ' + res.grup + ', wyników: ' + res.n).setFontWeight('bold');
+  sh.getRange('A3').setValue('Obliczono: ' + Utilities.formatDate(new Date(), 'Europe/Warsaw', 'yyyy-MM-dd HH:mm')
+    + ' | b ofic. (x) = współczynniki z Ustawień, sekcja B').setFontColor(STYLE.noteFont);
+  writeStaleCheck_(sh, 'A4', '📊 Analiza → Porównanie 0 / x / 1');
+
+  const FIX = 3, BLK = 5;
+  const sub = [miaraSym_(), 'p', 'lekka tercja', 'ciężka tercja', 'zmiana przy −' + POROWNANIE_DW + ' kg'];
+  const writeTable = (top, title, labelHeader, list) => {
+    sh.getRange(top, 1).setValue(title).setFontWeight('bold');
+    const HR = top + 1, SR = top + 2, R0 = top + 3;
+    const hdr = (r, c, rs, cs, text, isSub) => {
+      const rg = sh.getRange(r, c, rs, cs);
+      if (rs > 1 || cs > 1) rg.merge();
+      rg.setValue(text);
+      isSub ? rg.setBackground(STYLE.sectionBg).setFontWeight('bold').setHorizontalAlignment('center').setWrap(true)
+            : styleHeader_(rg).setWrap(true);
+    };
+    hdr(HR, 1, 2, 1, labelHeader);
+    hdr(HR, 2, 2, 1, 'grup');
+    hdr(HR, 3, 2, 1, 'n');
+    POROWNANIE_ALGOS.forEach((a, i) => {
+      const c = FIX + 1 + i * BLK;
+      hdr(HR, c, 1, BLK, a.label);
+      sub.forEach((t, k) => hdr(SR, c + k, 1, 1, t, true));
+    });
+    const cx = FIX + 1 + POROWNANIE_ALGOS.length * BLK;
+    hdr(HR, cx, 2, 1, 'Najbliżej 0 (' + miaraSym_() + ')');
+    sh.setRowHeight(SR, 32);
+    if (!list.length) {
+      sh.getRange(R0, 1).setValue('Brak danych.').setFontStyle('italic');
+      return R0;
+    }
+    const out = list.map(g => [g.key, g.grup, g.n].concat(
+      g.algos.reduce((a, x) => a.concat([x.r, x.p, x.light, x.heavy, x.gain]), []), [g.closest]));
+    const nCols = cx;
+    const rng = sh.getRange(R0, 1, out.length, nCols).setValues(out);
+    rng.setBorder(true, true, true, true, true, true, '#BFBFBF', SpreadsheetApp.BorderStyle.SOLID);
+    sh.getRange(R0, 2, out.length, nCols - 1).setHorizontalAlignment('center');
+    sh.getRange(R0, 1, out.length, 1).setFontWeight('bold');
+    const bg = [], fc = [], fw = [];
+    out.forEach(row => {
+      const b = [], f = [], w = [];
+      row.forEach((v, c) => {
+        const k = c - FIX, inB = k >= 0 && k < POROWNANIE_ALGOS.length * BLK, pos = k % BLK;
+        let color = null;
+        if (inB && typeof v === 'number') {
+          if (pos === 0) color = divergingColor_(v);
+          else if (pos === 2) color = divergingColor_((0.5 - v) * 2);
+          else if (pos === 3) color = divergingColor_((v - 0.5) * 2);
+          else if (pos === 4) color = divergingColor_(-v / 10);
+        }
+        b.push(color);
+        const sig = inB && pos === 1 && typeof v === 'number' && v < 0.05;
+        f.push(sig ? '#C00000' : null);
+        w.push(sig ? 'bold' : null);
+      });
+      bg.push(b); fc.push(f); fw.push(w);
+    });
+    rng.setBackgrounds(bg).setFontColors(fc).setFontWeights(fw);
+    sh.getRange(R0, 1, out.length, 1).setFontWeight('bold');
+    POROWNANIE_ALGOS.forEach((a, i) => {
+      const c = FIX + 1 + i * BLK;
+      sh.getRange(R0, c, out.length, 2).setNumberFormat('0.000');
+      sh.getRange(R0, c + 2, out.length, 2).setNumberFormat('0%');
+      sh.getRange(R0, c + 4, out.length, 1).setNumberFormat('+0.0" pp";-0.0" pp";0.0" pp"');
+      sh.getRange(R0, c + BLK - 1, out.length, 1).setBorder(null, null, null, true, null, null, '#1F3A5F', SpreadsheetApp.BorderStyle.SOLID_MEDIUM);
+    });
+    for (let i = 1; i < out.length; i++) {
+      if (String(out[i][0]).split(' | ')[0] !== String(out[i - 1][0]).split(' | ')[0]) {
+        sh.getRange(R0 + i, 1, 1, nCols).setBorder(true, null, null, null, null, null, '#1F3A5F', SpreadsheetApp.BorderStyle.SOLID_MEDIUM);
+      }
+    }
+    return R0 + out.length - 1;
+  };
+
+  let row = writeTable(6, '1. Klasa × typ boju (średnio z grup rywalizacji) — p pominięte: ci sami zawodnicy w kilku bojach',
+    'Klasa | typ boju', res.klasaTyp.concat(res.plecTyp));
+  row = writeTable(row + 3, '2. Klasa × bój', 'Klasa | bój', res.klasaBoj);
+
+  [
+    miaraSym_() + ': korelacja wyniku z wagą w grupie rywalizacji (uśredniona Fisherem). 0 = waga nie ma znaczenia; minus = lżejsi wyżej; plus = ciężsi wyżej. ' + miaraOpis_(),
+    'Lekka / ciężka tercja: średni percentyl (miejsce w grupie: 0% = ostatni, 100% = pierwszy) najlżejszej i najcięższej trzeciej części zawodników grupy. Neutralnie: obie ok. 50%.',
+    'Zmiana przy −' + POROWNANIE_DW + ' kg: o ile punktów procentowych średnio przesunąłby się percentyl zawodnika, gdyby ważył ' + POROWNANIE_DW + ' kg mniej (reszta grupy bez zmian) — opłacalność zbijania wagi. Przy b = 0 zmiana tylko w Pull-Up (ciężar = waga + obciążenie).',
+    'Kolory: pomarańcz = korzyść lżejszych, zielony = neutralnie, niebieski = korzyść cięższych; p < 0,05 na czerwono. Grupy z n < ' + MIN_N + ' pominięte; kategoria otwarta PRO KOBIET (PP 2024) liczona jako K +65.',
+  ].forEach((t, i) => sh.getRange(row + 2 + i, 1).setValue(t).setFontStyle('italic').setFontColor(STYLE.noteFont));
+
+  sh.setColumnWidth(1, 200);
+  sh.setColumnWidth(2, 45);
+  sh.setColumnWidth(3, 50);
+  for (let c = 4; c < 4 + POROWNANIE_ALGOS.length * BLK; c++) sh.setColumnWidth(c, 68);
+  sh.setColumnWidth(4 + POROWNANIE_ALGOS.length * BLK, 100);
+  sh.setFrozenColumns(1);
+  orderSheets_(ss);
+  ss.setActiveSheet(sh);
 }
 
 // ---------------------------------------------------------------- Wykres ρ(b)

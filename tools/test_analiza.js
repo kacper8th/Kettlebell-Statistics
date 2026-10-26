@@ -182,6 +182,18 @@ const odrz = (title, list) => {
 odrz('Korelacje (kategorie)', kat.rej || []);
 odrz('Korelacje (wagi)', wag.rejectedList || []);
 
+// --- porównanie 0 / x / 1
+{
+  let por;
+  writePorownanie_ = (ss, c, r) => { por = r; };
+  computeComparison();
+  const pc = v => typeof v === 'number' ? (100 * v).toFixed(0).padStart(3) + '%' : '  — ';
+  const pp = v => typeof v === 'number' ? ((v >= 0 ? '+' : '') + v.toFixed(1)).padStart(5) : '  —  ';
+  console.log(`\n== Porównanie 0 / x / 1 — ${por.grup} grup, ${por.n} wyników | ${miaraSym_()} / lekka / ciężka / zmiana przy −1 kg`);
+  por.klasaTyp.concat(por.plecTyp).forEach(g => console.log(`  ${g.key.padEnd(34)} n=${String(g.n).padStart(4)}  `
+    + g.algos.map((a, i) => `${['b0', 'x ', 'b1'][i]}: ${f3(a.r)} ${pc(a.light)} ${pc(a.heavy)} ${pp(a.gain)}`).join('  |  ')));
+}
+
 // --- wykres ρ(b): wybrane punkty krzywych
 {
   let wyk;

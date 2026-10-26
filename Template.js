@@ -12,7 +12,7 @@ const SHEET_DANE = 'Dane';
 const SHEET_WYNIKI = 'Wyniki';
 
 /** Kolejność zakładek w arkuszu (pozostałe zakładki trafiają za nimi). */
-const SHEET_ORDER = [SHEET_USTAWIENIA, SHEET_DANE, SHEET_WYNIKI, 'Korelacje', 'Korelacje (kategorie)', 'Korelacje (wagi)', 'Bootstrap', 'Wykres ρ(b)', 'Odrzucone'];
+const SHEET_ORDER = [SHEET_USTAWIENIA, SHEET_DANE, SHEET_WYNIKI, 'Korelacje', 'Porównanie 0 / x / 1', 'Korelacje (kategorie)', 'Korelacje (wagi)', 'Bootstrap', 'Wykres ρ(b)', 'Odrzucone'];
 
 /** Zakres wierszy obejmowany formułami zakładek wyliczanych (wiersze Danych 2…MAX_ROWS). */
 const MAX_ROWS = 5000;
@@ -174,6 +174,7 @@ function onOpen() {
     .addToUi();
   ui.createMenu('📊 Analiza')
     .addItem('Oblicz korelacje', 'computeCorrelations')
+    .addItem('Porównanie 0 / x / 1', 'computeComparison')
     .addItem('Oblicz korelacje w kategoriach', 'computeCorrelationsByCategory')
     .addItem('Oblicz korelacje w klasach (symulacja)', 'computeCorrelationsByWeightClass')
     .addSeparator()
