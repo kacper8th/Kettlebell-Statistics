@@ -9,6 +9,7 @@ const SHEET_ODRZUCONE = 'Odrzucone';
 const SHEET_KOR_KAT = 'Korelacje (kategorie)';
 const SHEET_KOR_WAGI = 'Korelacje (wagi)';
 const SHEET_BOOTSTRAP = 'Bootstrap';
+const SHEET_WYKRES = 'Wykres ρ(b)';
 
 /** Kolumny zakładki Wyniki (1 = A) — muszą odpowiadać WYNIKI_COLUMNS w Template.js. */
 const W = { zawody: 1, kategoria: 2, boj: 3, plec: 4, zawodnik: 5, wynik: 6, waga: 7, ciezar: 8, bOfic: 9,
@@ -85,7 +86,20 @@ function computeCorrelationsByCategory() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const ctx = analysisContext_(ss);
   if (!ctx) return;
+  const a = categoryAnalysis_(ctx);
+  writeKorKat_(ss, ctx, a.groups, a.classRes, a.strata, a.typeRes, a.rejectedList);
+  ss.toast('Policzono korelacje w kategoriach: ' + a.groups.filter(g => g.k).length + ' grup, '
+    + a.classRes.filter(c => c.k).length + ' wierszy klas wagowych, '
+    + a.strata.filter(x => x.rho.length).length + ' kategorii.'
+    + (ctx.powtorzenia.najnowszy ? ' Pominięto wcześniejszych startów: ' + ctx.powtorzenia.pominietoValid + '.' : '')
+    + (ctx.skrajne.on ? ' Odrzucono skrajnych: ' + a.rejectedCount + '.' : ''), '📊 Analiza', 6);
+}
 
+/**
+ * Obliczenia „Korelacje (kategorie)” (bez zapisu): klasy wagowe z nazw kategorii, warstwy wg podziału (sekcja F).
+ * Zwraca też classEntries / sexEntries (warstwy z wagami i ciężarami) — używane w średnich wg typu i w wykresie ρ(b).
+ */
+function categoryAnalysis_(ctx) {
   const strata = [];          // tabela 5: jedna kategoria w danym boju
   const classRes = [];        // tabela 2: klasa wagowa × bój
   const classEntries = [], sexEntries = [];   // tabele 3–4: średnio z bojów danego typu
@@ -141,12 +155,8 @@ function computeCorrelationsByCategory() {
     || bojOrder.indexOf(a.boj) - bojOrder.indexOf(b.boj));
 
   const typeRes = { klasy: poolByType_(ctx, classEntries, klasyOrder), plcie: poolByType_(ctx, sexEntries, PLCIE) };
-  writeKorKat_(ss, ctx, groups, classRes, strata, typeRes, rejectedList);
-  ss.toast('Policzono korelacje w kategoriach: ' + groups.filter(g => g.k).length + ' grup, '
-    + classRes.filter(c => c.k).length + ' wierszy klas wagowych, '
-    + strata.filter(x => x.rho.length).length + ' kategorii.'
-    + (ctx.powtorzenia.najnowszy ? ' Pominięto wcześniejszych startów: ' + ctx.powtorzenia.pominietoValid + '.' : '')
-    + (ctx.skrajne.on ? ' Odrzucono skrajnych: ' + rejectedCount + '.' : ''), '📊 Analiza', 6);
+  return { groups: groups, classRes: classRes, strata: strata, typeRes: typeRes, rejectedList: rejectedList,
+    rejectedCount: rejectedCount, classEntries: classEntries, sexEntries: sexEntries, klasyOrder: klasyOrder };
 }
 
 /**
@@ -294,7 +304,8 @@ function weightClassAnalysis_(ctx) {
   classRes.sort((a, b) => klasyOrder.indexOf(a.klasa) - klasyOrder.indexOf(b.klasa)
     || bojOrder.indexOf(a.boj) - bojOrder.indexOf(b.boj));
   const typeRes = { klasy: poolByType_(ctx, classEntries, klasyOrder, ALGOS_SYM), plcie: poolByType_(ctx, sexEntries, PLCIE, ALGOS_SYM) };
-  return { overview: overview, classRes: classRes, sexRes: sexRes, typeRes: typeRes, rejected: rejected, rejectedList: rejectedList };
+  return { overview: overview, classRes: classRes, sexRes: sexRes, typeRes: typeRes, rejected: rejected, rejectedList: rejectedList,
+    classEntries: classEntries, sexEntries: sexEntries, klasyOrder: klasyOrder };
 }
 
 /** Zakładka „Korelacje (wagi)”: przegląd klas, klasa × bój, płeć × bój. */
@@ -431,6 +442,174 @@ function writeTypeTables_(sh, ctx, top, num, typeRes, algoTitle, labelHeader, al
   row = writeSummaryTable_(sh, ctx, row + 2, (num + 1) + '. Średnio z bojów — płeć × typ boju (wszystkie klasy)',
     'Płeć | typ boju', typeRes.plcie, algoTitle, true, algos, 'bojów');
   return row;
+}
+
+// ---------------------------------------------------------------- Wykres ρ(b)
+
+/** Siatka b na wykresie ρ(b): od B_SCAN.min do B_SCAN.max co WYKRES_KROK (+ wartości b oficjalnych). */
+const WYKRES_KROK = 0.05;
+
+/**
+ * 📊 Analiza → Wykres ρ(b)
+ * Dla każdej płci i typu boju: ρ(waga, ciężar / waga^b) w funkcji b, osobno dla każdej klasy i dla wszystkich klas razem
+ * (boje danego typu i kategorie uśrednione Fisherem). Dwa zestawy: A — kategorie oficjalne (jak Korelacje (kategorie)),
+ * B — klasy z symulacji (sekcja H, jak Korelacje (wagi)). Miejsce przecięcia z zerem = b neutralne.
+ */
+function computeRhoCurves() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ctx = analysisContext_(ss);
+  if (!ctx) return;
+  if (!ctx.klasySym) {
+    SpreadsheetApp.getUi().alert('Brak sekcji H (symulacja klas wagowych) w Ustawieniach — uruchom ⚙️ Setup → Inicjalizacja.');
+    return;
+  }
+  const blocks = rhoCurvesAnalysis_(ctx);
+  writeWykres_(ss, ctx, blocks);
+  ss.toast('Policzono krzywe ρ(b): ' + blocks.length + ' wykresów.', '📊 Analiza', 5);
+}
+
+/** ρ (uśrednione Fisherem) dla danego b w podanych warstwach (każda z polami w, c, n). */
+function rhoAtB_(strata, b) {
+  return fisherPool_(strata.map(x => ({
+    r: spearman_(x.w, x.c.map((c, j) => c / Math.pow(x.w[j], b))), n: x.n,
+  })), SPEARMAN_VAR).r;
+}
+
+/**
+ * Dane wykresów: zestaw A (kategorie oficjalne) i B (symulacja) × płeć × typ boju.
+ * @return {Object[]} {zestaw, plec, typ, bOfic, series: [{name, strata}], rows: [[b, ρ1, …]]}
+ */
+function rhoCurvesAnalysis_(ctx) {
+  const usable = x => x.w && x.n >= MIN_N;
+  const sets = [
+    { zestaw: 'A', a: categoryAnalysis_(ctx), labels: p => klasyDlaPlci_(p) },
+    { zestaw: 'B', a: weightClassAnalysis_(ctx), labels: p => simClassLabels_(p, ctx.klasySym[p]) },
+  ];
+  const blocks = [];
+  sets.forEach(set => {
+    TYPY_BOJOW.forEach(typ => {
+      PLCIE.forEach(p => {
+        const ofTyp = e => ctx.typBoju[e.boj] === typ;
+        const sexE = set.a.sexEntries.filter(e => e.grp === p && ofTyp(e));
+        const series = [];
+        set.labels(p).forEach(cl => {
+          const st = set.a.classEntries.filter(e => e.grp === cl && ofTyp(e)).reduce((x, e) => x.concat(e.strata), []).filter(usable);
+          if (st.length) series.push({ name: cl, strata: st });
+        });
+        const all = sexE.reduce((x, e) => x.concat(e.strata), []).filter(usable);
+        if (all.length) series.push({ name: p + ' wszystkie klasy', strata: all });
+        if (!series.length) return;
+        const bs = unique_(sexE.filter(e => e.strata.some(usable)).map(e => e.bOfic));
+        const bOfic = bs.length === 1 && typeof bs[0] === 'number' ? bs[0] : null;
+        // siatka b + b oficjalny (dwa razy — pionowa linia na wykresie)
+        const grid = [];
+        for (let b = B_SCAN.min; b <= B_SCAN.max + 1e-9; b += WYKRES_KROK) grid.push(Math.round(b * 100) / 100);
+        if (bOfic !== null && grid.indexOf(bOfic) < 0) grid.push(bOfic);
+        grid.push(-0.001, 0.001);   // tuż przy zerze — pokazuje skok ρ przy b = 0 (remisy przy równych ciężarach)
+        grid.sort((x, y) => x - y);
+        const rows = [];
+        grid.forEach(b => {
+          const vals = series.map(s => rhoAtB_(s.strata, b));
+          if (bOfic !== null && b === bOfic) {
+            rows.push([b].concat(vals, [0, -1]));
+            rows.push([b].concat(vals, [0, 1]));
+          } else {
+            rows.push([b].concat(vals, [0, '']));
+          }
+        });
+        blocks.push({ zestaw: set.zestaw, plec: p, typ: typ, bOfic: bOfic, series: series, rows: rows });
+      });
+    });
+  });
+  return blocks;
+}
+
+/** Zakładka „Wykres ρ(b)”: wykresy po lewej (A — kategorie oficjalne, B — symulacja), dane po prawej (od kolumny P). */
+function writeWykres_(ss, ctx, blocks) {
+  let sh = ss.getSheetByName(SHEET_WYKRES);
+  if (sh) {
+    sh.getCharts().forEach(c => sh.removeChart(c));
+    sh.clear();
+    sh.clearNotes();
+    sh.setConditionalFormatRules([]);
+  } else {
+    sh = ss.insertSheet(SHEET_WYKRES);
+  }
+  const DATA_COL = 16;
+  const need = 20 + blocks.reduce((s, b) => s + b.rows.length + 4, 0);
+  if (sh.getMaxRows() < need) sh.insertRowsAfter(sh.getMaxRows(), need - sh.getMaxRows());
+  if (sh.getMaxColumns() < 30) sh.insertColumnsAfter(sh.getMaxColumns(), 30 - sh.getMaxColumns());
+  sh.getRange(1, 1, sh.getMaxRows(), 30).setFontFamily(STYLE.font).setFontSize(10);
+
+  const granice = PLCIE.map(p => p + ': ' + (ctx.klasySym[p].length ? ctx.klasySym[p].map(fmt2_).join(' / ') : 'brak')).join(', ');
+  sh.getRange('A1').setValue('Korelacja wyniku z wagą w funkcji b — ρ(b)').setFontSize(14).setFontWeight('bold');
+  sh.getRange('A2').setValue('A: kategorie oficjalne (podział: ' + ctx.podzial + ') | B: symulacja klas (sekcja H): ' + granice
+    + ' | zawody = ' + ctx.filtrZawody + powtorzeniaInfo_(ctx, ctx.powtorzenia ? ctx.powtorzenia.pominietoValid : 0)
+    + ' | wartości skrajne: ' + (ctx.skrajne.on ? ctx.skrajne.metoda + ', próg ' + fmt2_(ctx.skrajne.prog) : 'nie odrzucane'))
+    .setFontWeight('bold');
+  sh.getRange('A3').setValue('Obliczono: ' + Utilities.formatDate(new Date(), 'Europe/Warsaw', 'yyyy-MM-dd HH:mm')
+    + ' | ρ < 0 = faworyzuje lżejszych, ρ > 0 = cięższych; przecięcie z zerem = b neutralne; czerwona pionowa linia = b oficjalne')
+    .setFontColor(STYLE.noteFont);
+  writeStaleCheck_(sh, 'A4', '📊 Analiza → Wykres ρ(b)', '&"|"&IFERROR(TEXTJOIN(";";FALSE;KLASY_SYM);"")');
+
+  const TYTUL_ZESTAWU = {
+    A: 'A. Kategorie oficjalne — klasy z nazw kategorii (K 65 / +65, M 85 / +85), AMATOR i PRO uśrednione wg podziału',
+    B: 'B. Symulacja klas (Ustawienia, sekcja H) — klasa wg wagi, AMATOR i PRO razem',
+  };
+  const CH_W = 620, CH_H = 330, ROWS_PER_CHART = 17;
+  let chartRow = 6, dataRow = 6;
+  ['A', 'B'].forEach(z => {
+    const list = blocks.filter(b => b.zestaw === z);
+    sh.getRange(chartRow, 1).setValue(TYTUL_ZESTAWU[z]).setFontWeight('bold').setFontSize(11);
+    chartRow++;
+    if (!list.length) {
+      sh.getRange(chartRow, 1).setValue('Brak danych.').setFontStyle('italic');
+      chartRow += 2;
+      return;
+    }
+    list.forEach((b, i) => {
+      const plecTxt = b.plec === 'K' ? 'Kobiety' : 'Mężczyźni';
+      const typTxt = b.typ === TYPY_BOJOW[0] ? 'boje siłowe' : 'boje wydolnościowe';
+      const title = z + ' · ' + plecTxt + ' — ' + typTxt + (b.bOfic !== null ? ' (b ofic. = ' + fmt2_(b.bOfic) + ')' : '');
+      // dane
+      const head = ['b'].concat(b.series.map(s => s.name), ['ρ = 0', 'b oficjalne']);
+      sh.getRange(dataRow, DATA_COL).setValue(title).setFontWeight('bold');
+      styleHeader_(sh.getRange(dataRow + 1, DATA_COL, 1, head.length).setValues([head]).setWrap(true));
+      const rng = sh.getRange(dataRow + 1, DATA_COL, b.rows.length + 1, head.length);
+      sh.getRange(dataRow + 2, DATA_COL, b.rows.length, head.length).setValues(b.rows);
+      sh.getRange(dataRow + 2, DATA_COL, b.rows.length, 1).setNumberFormat('0.00');
+      sh.getRange(dataRow + 2, DATA_COL + 1, b.rows.length, head.length - 1).setNumberFormat('0.000');
+      b.rows.forEach((r, k) => { if (r[r.length - 1] !== '') sh.getRange(dataRow + 2 + k, DATA_COL, 1, head.length).setBackground('#FCE8E6'); });
+      // wykres
+      const n = b.series.length;
+      const seriesOpt = {};
+      seriesOpt[n] = { color: '#9E9E9E', lineWidth: 1, lineDashStyle: [4, 4], visibleInLegend: false };
+      seriesOpt[n + 1] = { color: '#C00000', lineWidth: 2, lineDashStyle: [6, 3] };
+      const chart = sh.newChart().setChartType(Charts.ChartType.LINE).addRange(rng)
+        .setNumHeaders(1)
+        .setPosition(chartRow + Math.floor(i / 2) * ROWS_PER_CHART, 1 + (i % 2) * 7, 0, 0)
+        .setOption('title', title)
+        .setOption('width', CH_W).setOption('height', CH_H)
+        .setOption('useFirstColumnAsDomain', true)
+        .setOption('interpolateNulls', false)
+        .setOption('hAxis', { title: 'b (wykładnik masy ciała)', viewWindow: { min: B_SCAN.min, max: B_SCAN.max } })
+        .setOption('vAxis', { title: 'ρ (waga vs wynik)', viewWindow: { min: -1, max: 1 } })
+        .setOption('legend', { position: 'bottom' })
+        .setOption('series', seriesOpt)
+        .build();
+      sh.insertChart(chart);
+      dataRow += b.rows.length + 4;
+    });
+    chartRow += Math.ceil(list.length / 2) * ROWS_PER_CHART + 1;
+  });
+
+  [
+    'Każda linia: ρ między wagą a wynikiem (ciężar / waga^b) przy danym b — boje danego typu i kategorie uśrednione Fisherem. „wszystkie klasy” = klasy tej płci razem (uśrednione, nie zmieszane).',
+    'Przecięcie z zerem = b neutralne. Skok przy b = 0: odważniki co 2–4 kg dają remisy przy b = 0, a każde b > 0 rozstrzyga je na korzyść lżejszego.',
+    'Dane wykresów: od kolumny P (wiersz b oficjalnego podświetlony). Wybrane boje i typy — Ustawienia, sekcja B; klasy symulacji — sekcja H.',
+  ].forEach((t, i) => sh.getRange(chartRow + 1 + i, 1).setValue(t).setFontStyle('italic').setFontColor(STYLE.noteFont));
+  orderSheets_(ss);
+  ss.setActiveSheet(sh);
 }
 
 // ---------------------------------------------------------------- Bootstrap

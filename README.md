@@ -22,7 +22,7 @@ wynik = ciężar / waga_zawodnika ^ b
 | `.claspignore` | clasp wysyła tylko pliki z głównego folderu (bez `tools/`, `dane/`) |
 | `Template.js` | struktura arkusza: Inicjalizacja, Ustawienia, Dane, Wyniki, menu |
 | `Code.js` | import CSV, liczenie wag |
-| `Analiza.js` | analizy liczone skryptem: Korelacje, Korelacje (kategorie), Korelacje (wagi), Odrzucone |
+| `Analiza.js` | analizy liczone skryptem: Korelacje, Korelacje (kategorie), Korelacje (wagi), Bootstrap, Wykres ρ(b), Odrzucone |
 | `Import.html` | okienko importu CSV |
 | `tools/pdf_to_csv.py` | PDF z wynikami → CSV do importu (Python + `pdftotext`) |
 | `tools/test_analiza.js` | logika arkusza uruchamiana lokalnie w Node na `dane/*.csv` (sprawdzanie obliczeń) |
@@ -34,6 +34,7 @@ wynik = ciężar / waga_zawodnika ^ b
 - **📥 Dane → Importuj CSV**, **Policz wagi**
 - **📊 Analiza → Oblicz korelacje**, **Oblicz korelacje w kategoriach**, **Oblicz korelacje w klasach (symulacja)** (granice klas i schemat b w Ustawieniach, sekcja H); w sekcji B: „Analizuj” i „Typ” boju (średnie dla bojów siłowych / wydolnościowych)
 - **📊 Analiza → Bootstrap (przedziały ufności)** — losowanie zawodników ze zwracaniem, 95% CI dla b neutralnego i ρ (Ustawienia, sekcja I: liczba powtórzeń, ziarno)
+- **📊 Analiza → Wykres ρ(b)** — krzywe ρ w funkcji b dla kategorii oficjalnych (A) i klas z symulacji (B), osobno boje siłowe / wydolnościowe
 
 ## Praca z kodem
 

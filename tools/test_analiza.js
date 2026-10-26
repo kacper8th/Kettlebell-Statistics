@@ -179,6 +179,22 @@ const odrz = (title, list) => {
 odrz('Korelacje (kategorie)', kat.rej || []);
 odrz('Korelacje (wagi)', wag.rejectedList || []);
 
+// --- wykres ρ(b): wybrane punkty krzywych
+{
+  let wyk;
+  writeWykres_ = (ss, c, b) => { wyk = b; };
+  const t0 = Date.now();
+  computeRhoCurves();
+  console.log(`\n== Wykres ρ(b) — ${wyk.length} wykresów (${Date.now() - t0} ms); ρ przy b = −0,05 / 0 / 0,05 / b ofic. / 1`);
+  wyk.forEach(bl => {
+    const at = b => bl.rows.find(r => Math.abs(r[0] - b) < 1e-9);
+    bl.series.forEach((s, i) => {
+      const v = b => { const r = at(b); return r ? f3(r[i + 1]) : '   —  '; };
+      console.log(`  ${bl.zestaw} ${bl.plec} ${bl.typ.padEnd(13)} ${s.name.padEnd(20)} ${v(-0.05)} ${v(0)} ${v(0.05)} | ofic ${bl.bOfic !== null ? v(bl.bOfic) : '—'} | ${v(1)}`);
+    });
+  });
+}
+
 // --- bootstrap (tylko z --bootstrap N)
 if (opt('bootstrap', '')) {
   let boot;
