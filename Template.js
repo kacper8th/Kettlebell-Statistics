@@ -113,6 +113,7 @@ const U = {
   bOficjalneBoje: 'A' + U_ROWS.bFirst + ':A' + U_ROWS.bLast,
   bOficjalne:     'B' + U_ROWS.bFirst + ':C' + U_ROWS.bLast,
   bAnalizuj:      'D' + U_ROWS.bFirst + ':D' + U_ROWS.bLast,
+  bTyp:           'E' + U_ROWS.bFirst + ':E' + U_ROWS.bLast,
   bTest:          B_TESTOWE_START.map((_, i) => 'B' + (U_ROWS.cFirst + i)),
   skanStart:      'B' + U_ROWS.skanStart,
   skanKrok:       'B' + U_ROWS.skanKrok,
@@ -135,6 +136,7 @@ const NAMED_RANGES = {
   B_OFICJALNE_BOJE: U.bOficjalneBoje,
   B_OFICJALNE:      U.bOficjalne,
   B_ANALIZUJ:       U.bAnalizuj,
+  B_TYP:            U.bTyp,
   B_TEST_1:         U.bTest[0],
   B_TEST_2:         U.bTest[1],
   B_TEST_3:         U.bTest[2],
@@ -182,6 +184,7 @@ function setupTemplate() {
   const addedH = ensureSekcjaKlasySym_(ss);
   const addedHb = ensureSchematB_(ss);
   const addedAnalizuj = ensureKolumnaAnalizuj_(ss);
+  const addedTyp = ensureKolumnaTyp_(ss);
   const fixedNames = ensureNamedRanges_(ss);
   applyDaneRules_(ss);
   buildWyniki_(ss);
@@ -196,6 +199,7 @@ function setupTemplate() {
     + (addedH ? ' Dodano w Ustawieniach sekcję H (symulacja klas wagowych).' : '')
     + (addedHb ? ' Dodano w sekcji H współczynniki schematu (b dla każdej klasy).' : '')
     + (addedAnalizuj ? ' Dodano w Ustawieniach kolumnę „Analizuj” przy bojach (sekcja B).' : '')
+    + (addedTyp ? ' Dodano w Ustawieniach kolumnę „Typ” przy bojach (sekcja B).' : '')
     + (fixedNames.length ? ' Naprawiono zakresy nazwane: ' + fixedNames.join(', ') + '.' : '')
     + ' Walidacja Danych zaktualizowana. Zbudowano: ' + SHEET_WYNIKI + '.';
   ss.toast(msg, 'Inicjalizacja zakończona', 6);
@@ -330,6 +334,7 @@ function ensureUstawienia_(ss) {
     + 'wynik = ciężar / waga ^ b\n\nLista bojów jest wzorcowa — do niej odwołuje się walidacja i import Danych. '
     + 'Odmiany Snatcha (2\', 6\') to osobne boje.');
   writeKolumnaAnalizuj_(sh);
+  writeKolumnaTyp_(sh);
 
   // C. Współczynniki testowe
   styleSection_(sh.getRange('A' + R.cHead + ':C' + R.cHead), 'C. Współczynniki testowe');
@@ -360,7 +365,7 @@ function ensureUstawienia_(ss) {
   writeSekcjaKlasySym_(sh);
 
   // Szerokości kolumn
-  [[1, 170], [2, 110], [3, 110], [4, 70], [5, 30], [6, 190], [7, 220]]
+  [[1, 170], [2, 110], [3, 110], [4, 70], [5, 110], [6, 190], [7, 220]]
     .forEach(([col, w]) => sh.setColumnWidth(col, w));
 
   // Zakresy nazwane (stare o tych nazwach — np. po ręcznym usunięciu zakładki — są najpierw usuwane)
@@ -564,6 +569,42 @@ function writeKolumnaAnalizuj_(sh) {
   rng.insertCheckboxes().setValue(true).setHorizontalAlignment('center').setBackground(STYLE.inputBg);
   sh.setColumnWidth(4, 70);
   setNamedRange_(ss, 'B_ANALIZUJ', rng);
+}
+
+/** Typy bojów do średnich w analizach (kolumna E w sekcji B Ustawień). */
+const TYPY_BOJOW = ['Siłowy', 'Wydolnościowy'];
+
+/** Typ startowy boju: odmiany Snatcha = wydolnościowy, pozostałe = siłowy. */
+function typBojuStart_(boj) {
+  return isSnatch_(boj) ? TYPY_BOJOW[1] : TYPY_BOJOW[0];
+}
+
+/**
+ * Kolumna E w sekcji B Ustawień — typ boju (Siłowy / Wydolnościowy) do tabel „średnio z bojów” w analizach.
+ * Startowo: Snatch = Wydolnościowy, pozostałe = Siłowy.
+ */
+function writeKolumnaTyp_(sh) {
+  const R = U_ROWS;
+  const ss = sh.getParent();
+  styleHeader_(sh.getRange('E' + R.bCols).setValue('Typ').setFontFamily(STYLE.font).setFontSize(10));
+  sh.getRange('E' + R.bCols).setNote('Typ boju do tabel „średnio z bojów” w Korelacjach (kategorie) i Korelacjach (wagi): '
+    + 'korelacje uśredniane osobno dla bojów siłowych i wydolnościowych.\n\n'
+    + 'Uśrednianie ma sens, gdy boje danego typu mają ten sam współczynnik oficjalny.');
+  const rng = sh.getRange(U.bTyp);
+  styleInput_(rng.setValues(B_OFICJALNE_START.map(r => [typBojuStart_(r[0])])));
+  rng.setDataValidation(SpreadsheetApp.newDataValidation()
+    .requireValueInList(TYPY_BOJOW, true).setAllowInvalid(false).build());
+  sh.setColumnWidth(5, 110);
+  setNamedRange_(ss, 'B_TYP', rng);
+}
+
+/** Dopisuje kolumnę „Typ” do istniejących Ustawień, jeśli jej brak (pusty nagłówek E w sekcji B). @return {boolean} */
+function ensureKolumnaTyp_(ss) {
+  const sh = ss.getSheetByName(SHEET_USTAWIENIA);
+  if (!sh || namedRange_(ss, 'B_TYP')) return false;
+  if (String(sh.getRange('E' + U_ROWS.bCols).getValue()).trim() !== '') return false;
+  writeKolumnaTyp_(sh);
+  return true;
 }
 
 /** Dopisuje kolumnę „Analizuj” do istniejących Ustawień, jeśli jej brak (pusty nagłówek D w sekcji B). @return {boolean} */

@@ -32,7 +32,7 @@ wynik = ciężar / waga_zawodnika ^ b
 
 - **⚙️ Setup → Inicjalizacja** — buduje / naprawia strukturę (bezpieczne do wielokrotnego uruchamiania)
 - **📥 Dane → Importuj CSV**, **Policz wagi**
-- **📊 Analiza → Oblicz korelacje**, **Oblicz korelacje w kategoriach**, **Oblicz korelacje w klasach (symulacja)** (granice klas i schemat b w Ustawieniach, sekcja H)
+- **📊 Analiza → Oblicz korelacje**, **Oblicz korelacje w kategoriach**, **Oblicz korelacje w klasach (symulacja)** (granice klas i schemat b w Ustawieniach, sekcja H); w sekcji B: „Analizuj” i „Typ” boju (średnie dla bojów siłowych / wydolnościowych)
 
 ## Praca z kodem
 

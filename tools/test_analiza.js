@@ -129,13 +129,14 @@ const ctx = {
   filtrZawody: filtrZawody, filtrKategoria: filtrKategoria, tests: testy,
   klasySym: klasySymFromValues_(klasyVals),
   schematB: schematBFromValues_(schematVals),
+  typBoju: B_OFICJALNE_START.reduce((o, r) => { o[r[0]] = typBojuStart_(r[0]); return o; }, {}),
   boje: { wybrane: B_OFICJALNE_START.map(r => r[0]).filter(b => bojeWybrane.indexOf(b) >= 0), wszystkich: B_OFICJALNE_START.length },
 };
 analysisContext_ = () => ctx;
 writeOdrzucone_ = () => {};
 let kor, kat;
 writeKorelacje_ = (ss, c, g) => { kor = g; };
-writeKorKat_ = (ss, c, g, cl, st) => { kat = { g: g, cl: cl, st: st }; };
+writeKorKat_ = (ss, c, g, cl, st, ty) => { kat = { g: g, cl: cl, st: st, ty: ty }; };
 let wag;
 writeKorWagi_ = (ss, c, r) => { wag = r; };
 computeCorrelations();
@@ -156,9 +157,15 @@ console.log('\n== Korelacje (kategorie) — tabela 1: wg płci');
 kat.g.filter(g => g.k).forEach(g => console.log(line(g)));
 console.log('\n== Korelacje (kategorie) — tabela 2: wg klas wagowych');
 kat.cl.filter(g => g.k).forEach(g => console.log(line(g)));
+const lineT = g => `  ${g.key.padEnd(30)} bojów ${g.k} n=${String(g.n).padStart(4)}  ρ: b=0 ${f3(g.algos[0].rho)}  b=1 ${f3(g.algos[1].rho)}  ofic ${f3(g.algos[2].rho)}`
+  + (g.algos[6] ? `  schemat ${f3(g.algos[6].rho)}` : '') + `  | b neutralne ${f2(g.bNeutral)} | b ofic ${f2(g.bOfic)}`;
+console.log('\n== Korelacje (kategorie) — średnio z bojów: klasa × typ, płeć × typ');
+kat.ty.klasy.concat(kat.ty.plcie).filter(g => g.k).forEach(g => console.log(lineT(g)));
 console.log(`\n== Korelacje (wagi) — symulacja klas: ${klasyArg} | schemat: ${schematArg || 'oficjalny'}`);
 wag.overview.forEach(o => console.log(`  ${o.klasa.padEnd(12)} startów ${String(o.starty).padStart(3)}  waga ${f2(o.min)} / ${f2(o.med)} / ${f2(o.max)}  b schematu ${f2(o.bSchematu)}`));
 console.log('  -- klasa × bój');
 wag.classRes.filter(g => g.k).forEach(g => console.log(line(g)));
 console.log('  -- płeć × bój (Fisher z klas)');
 wag.sexRes.filter(g => g.k).forEach(g => console.log(line(g)));
+console.log('  -- średnio z bojów: klasa × typ, płeć × typ');
+wag.typeRes.klasy.concat(wag.typeRes.plcie).filter(g => g.k).forEach(g => console.log(lineT(g)));

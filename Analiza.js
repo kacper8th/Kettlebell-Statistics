@@ -85,8 +85,9 @@ function computeCorrelationsByCategory() {
   const ctx = analysisContext_(ss);
   if (!ctx) return;
 
-  const strata = [];          // tabela 3: jedna kategoria w danym boju
+  const strata = [];          // tabela 5: jedna kategoria w danym boju
   const classRes = [];        // tabela 2: klasa wagowa × bój
+  const classEntries = [], sexEntries = [];   // tabele 3–4: średnio z bojów danego typu
   let rejectedCount = 0;
   const klasaOf = r => stratumLabel_(r, PODZIALY[0]);
 
@@ -123,9 +124,12 @@ function computeCorrelationsByCategory() {
       if (pooled.n > 0) {
         classRes.push(Object.assign({ key: cl + ' | ' + g.boj, klasa: cl, boj: g.boj, bOfic: g.bOfic, out: out }, pooled));
       }
+      classEntries.push({ grp: cl, boj: g.boj, bOfic: g.bOfic, strata: sub, out: out });
     });
 
-    return Object.assign({ key: g.key, bOfic: g.bOfic, out: st.reduce((s, x) => s + x.out, 0) }, poolStrata_(st));
+    const gOut = st.reduce((s, x) => s + x.out, 0);
+    sexEntries.push({ grp: g.plec, boj: g.boj, bOfic: g.bOfic, strata: st, out: gOut });
+    return Object.assign({ key: g.key, bOfic: g.bOfic, out: gOut }, poolStrata_(st));
   });
 
   const bojOrder = ctx.groups.map(g => g.boj);
@@ -133,7 +137,8 @@ function computeCorrelationsByCategory() {
   classRes.sort((a, b) => klasyOrder.indexOf(a.klasa) - klasyOrder.indexOf(b.klasa)
     || bojOrder.indexOf(a.boj) - bojOrder.indexOf(b.boj));
 
-  writeKorKat_(ss, ctx, groups, classRes, strata);
+  const typeRes = { klasy: poolByType_(ctx, classEntries, klasyOrder), plcie: poolByType_(ctx, sexEntries, PLCIE) };
+  writeKorKat_(ss, ctx, groups, classRes, strata, typeRes);
   ss.toast('Policzono korelacje w kategoriach: ' + groups.filter(g => g.k).length + ' grup, '
     + classRes.filter(c => c.k).length + ' wierszy klas wagowych, '
     + strata.filter(x => x.rho.length).length + ' kategorii.'
@@ -251,7 +256,7 @@ function weightClassAnalysis_(ctx) {
   });
 
   // 2. klasa × bój, 3. płeć × bój
-  const classRes = [], sexRes = [];
+  const classRes = [], sexRes = [], classEntries = [], sexEntries = [];
   let rejected = 0;
   ctx.groups.forEach(g => {
     const gRows = valid.filter(r => r[W.boj - 1] === g.boj && r[W.plec - 1] === g.plec);
@@ -267,6 +272,7 @@ function weightClassAnalysis_(ctx) {
       rejected += out;
       const rec = makeStratum_(rows, {}, ALGOS_SYM);
       st.push(rec);
+      classEntries.push({ grp: cl, boj: g.boj, bOfic: g.bOfic, strata: [rec], out: out });
       const pooled = poolStrata_([rec], ALGOS_SYM);
       if (rows.length) {
         classRes.push(Object.assign({ key: cl + ' | ' + g.boj, klasa: cl, boj: g.boj, bOfic: g.bOfic, out: out }, pooled,
@@ -276,13 +282,15 @@ function weightClassAnalysis_(ctx) {
     sexRes.push(Object.assign({ key: g.key, bOfic: g.bOfic, out: 0 }, poolStrata_(st, ALGOS_SYM)));
     sexRes[sexRes.length - 1].out = classRes.filter(c => c.boj === g.boj && labels[g.plec].indexOf(c.klasa) >= 0)
       .reduce((s, c) => s + c.out, 0);
+    sexEntries.push({ grp: g.plec, boj: g.boj, bOfic: g.bOfic, strata: st, out: sexRes[sexRes.length - 1].out });
   });
 
   const bojOrder = ctx.groups.map(g => g.boj);
   const klasyOrder = PLCIE.reduce((a, p) => a.concat(labels[p]), []);
   classRes.sort((a, b) => klasyOrder.indexOf(a.klasa) - klasyOrder.indexOf(b.klasa)
     || bojOrder.indexOf(a.boj) - bojOrder.indexOf(b.boj));
-  return { overview: overview, classRes: classRes, sexRes: sexRes, rejected: rejected };
+  const typeRes = { klasy: poolByType_(ctx, classEntries, klasyOrder, ALGOS_SYM), plcie: poolByType_(ctx, sexEntries, PLCIE, ALGOS_SYM) };
+  return { overview: overview, classRes: classRes, sexRes: sexRes, typeRes: typeRes, rejected: rejected };
 }
 
 /** Zakładka „Korelacje (wagi)”: przegląd klas, klasa × bój, płeć × bój. */
@@ -297,7 +305,8 @@ function writeKorWagi_(ss, ctx, res) {
     sh = ss.insertSheet(SHEET_KOR_WAGI);
   }
   if (sh.getMaxColumns() < 30) sh.insertColumnsAfter(sh.getMaxColumns(), 30 - sh.getMaxColumns());
-  const need = 40 + res.overview.length + res.classRes.length + res.sexRes.length;
+  const need = 50 + res.overview.length + res.classRes.length + res.sexRes.length
+    + (res.typeRes ? res.typeRes.klasy.length + res.typeRes.plcie.length : 0);
   if (sh.getMaxRows() < need) sh.insertRowsAfter(sh.getMaxRows(), need - sh.getMaxRows());
   sh.getRange(1, 1, sh.getMaxRows(), 30).setFontFamily(STYLE.font).setFontSize(10);
 
@@ -341,6 +350,9 @@ function writeKorWagi_(ss, ctx, res) {
   row = writeSummaryTable_(sh, ctx, row + 2, '3. Podsumowanie wg płci — bój | płeć (klasy uśrednione metodą Fishera; „kategorii” = liczba klas)',
     'Grupa', res.sexRes, algoTitle, false, ALGOS_SYM);
 
+  // ---- 4–5. Średnio z bojów danego typu
+  if (res.typeRes) row = writeTypeTables_(sh, ctx, row + 2, 4, res.typeRes, algoTitle, 'Klasa | typ boju', ALGOS_SYM);
+
   // ---- Legenda
   [
     'Schemat: ciężar / waga ^ b klasy z Ustawień (sekcja H, „b w schemacie”); puste pole = b oficjalny boju. Tabela 3 pokazuje, jak cały schemat działa razem.',
@@ -363,6 +375,54 @@ function writeKorWagi_(ss, ctx, res) {
   sh.setFrozenColumns(1);
   orderSheets_(ss);
   ss.setActiveSheet(sh);
+}
+
+/**
+ * Średnio z bojów danego typu (Ustawienia, sekcja B, kolumna „Typ”): dla każdej grupy (klasy albo płci) i typu boju
+ * kategorie / klasy wszystkich zaznaczonych bojów tego typu uśredniane razem metodą Fishera; b neutralne — jedno dla typu.
+ * p i 95% CI pomijane: ci sami zawodnicy występują w kilku bojach, więc wyszłyby zbyt optymistyczne.
+ * @param {Object[]} entries — {grp, boj, bOfic, strata, out}
+ * @param {string[]} grpOrder — kolejność grup
+ * @return {Object[]} wiersze w formacie writeSummaryTable_ (k = liczba bojów)
+ */
+function poolByType_(ctx, entries, grpOrder, algos) {
+  const out = [];
+  const grps = unique_(entries.map(e => e.grp)).sort((a, b) => grpOrder.indexOf(a) - grpOrder.indexOf(b));
+  grps.forEach(grp => {
+    TYPY_BOJOW.forEach(typ => {
+      const sel = entries.filter(e => e.grp === grp && ctx.typBoju[e.boj] === typ);
+      if (!sel.length) return;
+      const usable = x => x.rho.length && x.rho.every(v => v !== '');
+      const used = sel.filter(e => e.strata.some(usable));
+      const pooled = poolStrata_(sel.reduce((a, e) => a.concat(e.strata), []), algos);
+      pooled.algos.forEach(a => { a.p = ''; a.lo = ''; a.hi = ''; });
+      const bs = unique_(used.map(e => e.bOfic));
+      const typLabel = typ === TYPY_BOJOW[0] ? 'siłowe' : 'wydolnościowe';
+      const label = (PLCIE.indexOf(grp) >= 0 ? grp + ' (wszystkie klasy)' : grp) + ' | ' + typLabel;
+      out.push(Object.assign(pooled, { key: label, k: used.length, bOfic: bs.length > 1 ? 'różne' : (bs[0] === undefined ? '' : bs[0]),
+        out: sel.reduce((s, e) => s + e.out, 0), boje: used.map(e => e.boj) }));
+    });
+  });
+  return out;
+}
+
+/**
+ * Tabele „średnio z bojów”: klasa × typ i płeć × typ. Zwraca numer ostatniego wiersza.
+ * @param {number} num — numer pierwszej z dwóch tabel w zakładce
+ */
+function writeTypeTables_(sh, ctx, top, num, typeRes, algoTitle, labelHeader, algos) {
+  const all = typeRes.klasy.concat(typeRes.plcie);
+  const mixed = all.filter(x => x.bOfic === 'różne').map(x => x.key);
+  let row = top;
+  const note = 'n = liczba wyników (zawodnik liczony w każdym boju osobno); p i CI pominięte — ci sami zawodnicy w kilku bojach. '
+    + 'Typ boju: Ustawienia, sekcja B, kolumna „Typ”; uśredniane tylko zaznaczone boje („Analizuj”).'
+    + (mixed.length ? ' ⚠ Różne współczynniki oficjalne w: ' + mixed.join(', ') + ' — średnia mało sensowna.' : '');
+  sh.getRange(row, 1).setValue(note).setFontStyle('italic').setFontColor(mixed.length ? '#C00000' : STYLE.noteFont);
+  row = writeSummaryTable_(sh, ctx, row + 1, num + '. Średnio z bojów — klasa × typ boju (siłowe / wydolnościowe)',
+    labelHeader, typeRes.klasy, algoTitle, true, algos, 'bojów');
+  row = writeSummaryTable_(sh, ctx, row + 2, (num + 1) + '. Średnio z bojów — płeć × typ boju (wszystkie klasy)',
+    'Płeć | typ boju', typeRes.plcie, algoTitle, true, algos, 'bojów');
+  return row;
 }
 
 /** Etykiety klas wagowych dla płci, np. K → ['K 65', 'K +65']. */
@@ -496,7 +556,8 @@ function normCdf_(x) {
 }
 
 /** Zakładka „Korelacje (kategorie)”: tabela wg płci, tabela wg klas wagowych, szczegóły per kategoria. */
-function writeKorKat_(ss, ctx, groups, classRes, strata) {
+function writeKorKat_(ss, ctx, groups, classRes, strata, typeRes) {
+  typeRes = typeRes || { klasy: [], plcie: [] };
   let sh = ss.getSheetByName(SHEET_KOR_KAT);
   if (sh) {
     sh.clear();
@@ -507,7 +568,7 @@ function writeKorKat_(ss, ctx, groups, classRes, strata) {
     sh = ss.insertSheet(SHEET_KOR_KAT);
   }
   if (sh.getMaxColumns() < 30) sh.insertColumnsAfter(sh.getMaxColumns(), 30 - sh.getMaxColumns());
-  const need = 30 + groups.length + classRes.length + strata.length;
+  const need = 40 + groups.length + classRes.length + strata.length + typeRes.klasy.length + typeRes.plcie.length;
   if (sh.getMaxRows() < need) sh.insertRowsAfter(sh.getMaxRows(), need - sh.getMaxRows());
   sh.getRange(1, 1, sh.getMaxRows(), 30).setFontFamily(STYLE.font).setFontSize(10);
 
@@ -533,9 +594,12 @@ function writeKorKat_(ss, ctx, groups, classRes, strata) {
   row = writeSummaryTable_(sh, ctx, row + 2, '2. Podsumowanie wg klas wagowych — K 65, K +65, M 85, M +85 (wewnątrz klasy uśredniane kategorie wg podziału)',
     'Klasa | bój', classRes, algoTitle, true);
 
-  // ---- Tabela 3: szczegóły per kategoria
+  // ---- Tabele 3–4: średnio z bojów danego typu
+  row = writeTypeTables_(sh, ctx, row + 2, 3, typeRes, algoTitle, 'Klasa | typ boju');
+
+  // ---- Tabela 5: szczegóły per kategoria
   const D0 = row + 3;
-  sh.getRange(D0 - 2, 1).setValue('3. Szczegóły — ρ w każdej kategorii osobno (wg podziału z Ustawień, sekcja F)').setFontWeight('bold');
+  sh.getRange(D0 - 2, 1).setValue('5. Szczegóły — ρ w każdej kategorii osobno (wg podziału z Ustawień, sekcja F)').setFontWeight('bold');
   const dHead = ['Grupa', 'Kategoria (' + ctx.podzial + ')', 'n', 'odrzucono']
     .concat(ALGOS.map((a, i) => 'ρ ' + algoTitle(a, i))).concat(['b neutralne (ρ = 0)', 'b z regresji']);
   styleHeader_(sh.getRange(D0 - 1, 1, 1, dHead.length).setValues([dHead]).setWrap(true));
@@ -583,7 +647,7 @@ function writeKorKat_(ss, ctx, groups, classRes, strata) {
  * @param {boolean} skipEmpty — pomijaj wiersze bez danych
  * @return {number} numer ostatniego wiersza tabeli
  */
-function writeSummaryTable_(sh, ctx, top, title, labelHeader, items, algoTitle, skipEmpty, algos) {
+function writeSummaryTable_(sh, ctx, top, title, labelHeader, items, algoTitle, skipEmpty, algos, countHeader) {
   const A = algos || ALGOS;
   const hdr = (r, c, rs, cs, text, sub) => {
     const rg = sh.getRange(r, c, rs, cs);
@@ -596,7 +660,7 @@ function writeSummaryTable_(sh, ctx, top, title, labelHeader, items, algoTitle, 
   const HR = top + 1, SR = top + 2, R0 = top + 3, FIX = 5;
   sh.getRange(top, 1).setValue(title).setFontWeight('bold');
   hdr(HR, 1, 2, 1, labelHeader);
-  hdr(HR, 2, 2, 1, 'kategorii');
+  hdr(HR, 2, 2, 1, countHeader || 'kategorii');
   hdr(HR, 3, 2, 1, 'n');
   hdr(HR, 4, 2, 1, 'odrzucono');
   hdr(HR, 5, 2, 1, 'b oficjalny');
@@ -624,7 +688,7 @@ function writeSummaryTable_(sh, ctx, top, title, labelHeader, items, algoTitle, 
     if (!g.algos.length) return row.concat(new Array(nCols - FIX).fill(''));
     g.algos.forEach(a => row.push(a.rho, a.p, a.r));
     const o = g.algos[2];
-    row.push(g.bNeutral, o.rho === '' ? '' : fmt3_(o.lo) + ' … ' + fmt3_(o.hi), g.within, g.closest);
+    row.push(g.bNeutral, o.rho === '' || o.lo === '' ? '' : fmt3_(o.lo) + ' … ' + fmt3_(o.hi), g.within, g.closest);
     return row;
   });
   const rng = sh.getRange(R0, 1, out.length, nCols).setValues(out);
@@ -705,6 +769,11 @@ function analysisContext_(ss) {
   const anRange = namedRange_(ss, 'B_ANALIZUJ');
   const analizuj = anRange ? anRange.getValues().map(v => v[0] === true) : boje.map(() => true);
   const bojeWybrane = boje.filter((b, i) => b && analizuj[i]);
+  // typ boju (Ustawienia, sekcja B, kolumna „Typ”) — brak kolumny = Snatch wydolnościowy, reszta siłowe
+  const typRange = namedRange_(ss, 'B_TYP');
+  const typy = typRange ? typRange.getValues().map(v => String(v[0]).trim()) : [];
+  const typBoju = {};
+  boje.forEach((b, i) => { if (b) typBoju[b] = TYPY_BOJOW.indexOf(typy[i]) >= 0 ? typy[i] : typBojuStart_(b); });
   if (!bojeWybrane.length) {
     SpreadsheetApp.getUi().alert('Nie wybrano żadnego boju do analizy — zaznacz boje w Ustawieniach (sekcja B, kolumna „Analizuj”).');
     return null;
@@ -749,6 +818,7 @@ function analysisContext_(ss) {
     podzial: PODZIALY.indexOf(String(opt('PODZIAL_KATEGORII', PODZIALY[0]))) >= 0
       ? String(opt('PODZIAL_KATEGORII', PODZIALY[0])) : PODZIALY[0],
     boje: { wybrane: bojeWybrane, wszystkich: boje.filter(b => b).length },
+    typBoju: typBoju,
     klasySym: klasySymFromValues_(namedRange_(ss, 'KLASY_SYM') ? namedRange_(ss, 'KLASY_SYM').getValues() : null),
     schematB: schematBFromValues_(namedRange_(ss, 'KLASY_SYM_B') ? namedRange_(ss, 'KLASY_SYM_B').getValues() : null),
     filtrZawody: val('FILTR_ZAWODY'),
@@ -946,7 +1016,7 @@ const STALE_COL = 40;
 function writeStaleCheck_(sh, statusCell, action, extraSig) {
   const sig = '=FILTR_ZAWODY&"|"&FILTR_KATEGORIA&"|"&TEXTJOIN(";";FALSE;B_OFICJALNE_BOJE;B_OFICJALNE)'
     + '&"|"&B_TEST_1&"|"&B_TEST_2&"|"&B_TEST_3'
-    + '&"|"&IFERROR(SKRAJNE_ODRZUCAJ&SKRAJNE_METODA&SKRAJNE_PROG;"")&"|"&IFERROR(PODZIAL_KATEGORII;"")&"|"&IFERROR(POWTORZENIA;"")&"|"&IFERROR(TEXTJOIN(";";FALSE;B_ANALIZUJ);"")'
+    + '&"|"&IFERROR(SKRAJNE_ODRZUCAJ&SKRAJNE_METODA&SKRAJNE_PROG;"")&"|"&IFERROR(PODZIAL_KATEGORII;"")&"|"&IFERROR(POWTORZENIA;"")&"|"&IFERROR(TEXTJOIN(";";FALSE;B_ANALIZUJ);"")&"|"&IFERROR(TEXTJOIN(";";FALSE;B_TYP);"")'
     + '&"|"&SUM(' + SHEET_WYNIKI + '!J2:J' + MAX_ROWS + ')&"|"&ROUND(SUM(' + SHEET_WYNIKI + '!H2:H' + MAX_ROWS + ');3)'
     + (extraSig || '');
   const C = STALE_COL;
