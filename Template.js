@@ -12,7 +12,7 @@ const SHEET_DANE = 'Dane';
 const SHEET_WYNIKI = 'Wyniki';
 
 /** Kolejność zakładek w arkuszu (pozostałe zakładki trafiają za nimi). */
-const SHEET_ORDER = [SHEET_USTAWIENIA, SHEET_DANE, SHEET_WYNIKI, 'Korelacje', 'Odrzucone'];
+const SHEET_ORDER = [SHEET_USTAWIENIA, SHEET_DANE, SHEET_WYNIKI, 'Korelacje', 'Korelacje (kategorie)', 'Odrzucone'];
 
 /** Zakres wierszy obejmowany formułami zakładek wyliczanych (wiersze Danych 2…MAX_ROWS). */
 const MAX_ROWS = 5000;
@@ -92,7 +92,9 @@ const U_ROWS = (() => {
   const dHead = cLast + 2;                             // nagłówek sekcji D
   return { bHead: bFirst - 2, bCols: bFirst - 1, bFirst, bLast, cHead, cFirst, cLast,
            dHead, skanStart: dHead + 1, skanKrok: dHead + 2, skanKoniec: dHead + 3,
-           eHead: dHead + 5, eOn: dHead + 6, eMetoda: dHead + 7, eProg: dHead + 8 };
+           eHead: dHead + 5, eOn: dHead + 6, eMetoda: dHead + 7, eProg: dHead + 8,
+           fHead: dHead + 10, fPodzial: dHead + 11,
+           gHead: dHead + 13, gPowt: dHead + 14 };
 })();
 
 /** Adresy komórek w Ustawieniach. */
@@ -108,6 +110,8 @@ const U = {
   skrajneOn:      'B' + U_ROWS.eOn,
   skrajneMetoda:  'B' + U_ROWS.eMetoda,
   skrajneProg:    'B' + U_ROWS.eProg,
+  podzial:        'B' + U_ROWS.fPodzial,
+  powtorzenia:    'B' + U_ROWS.gPowt,
   listaZawodow:   'F5:F200',
   listaKategorii: 'G5:G200',
 };
@@ -126,6 +130,8 @@ const NAMED_RANGES = {
   SKRAJNE_ODRZUCAJ: U.skrajneOn,
   SKRAJNE_METODA:   U.skrajneMetoda,
   SKRAJNE_PROG:     U.skrajneProg,
+  PODZIAL_KATEGORII: U.podzial,
+  POWTORZENIA:      U.powtorzenia,
 };
 
 // ---------------------------------------------------------------- Menu i Inicjalizacja
@@ -142,6 +148,7 @@ function onOpen() {
     .addToUi();
   ui.createMenu('📊 Analiza')
     .addItem('Oblicz korelacje', 'computeCorrelations')
+    .addItem('Oblicz korelacje w kategoriach', 'computeCorrelationsByCategory')
     .addToUi();
 }
 
@@ -154,6 +161,8 @@ function setupTemplate() {
   if (ensureDane_(ss)) created.push(SHEET_DANE);
   const addedCols = ensureDaneHeaders_(ss);
   const addedE = ensureSekcjaSkrajne_(ss);
+  const addedF = ensureSekcjaPodzial_(ss);
+  const addedG = ensureSekcjaPowtorzenia_(ss);
   const fixedNames = ensureNamedRanges_(ss);
   applyDaneRules_(ss);
   buildWyniki_(ss);
@@ -163,6 +172,8 @@ function setupTemplate() {
   const msg = (created.length ? 'Utworzono: ' + created.join(', ') + '.' : 'Zakładki z danymi już istnieją — dane bez zmian.')
     + (addedCols.length ? ' Dodano kolumny w Danych: ' + addedCols.join(', ') + '.' : '')
     + (addedE ? ' Dodano w Ustawieniach sekcję E (wartości skrajne).' : '')
+    + (addedF ? ' Dodano w Ustawieniach sekcję F (analiza w kategoriach).' : '')
+    + (addedG ? ' Dodano w Ustawieniach sekcję G (powtarzający się zawodnicy).' : '')
     + (fixedNames.length ? ' Naprawiono zakresy nazwane: ' + fixedNames.join(', ') + '.' : '')
     + ' Walidacja Danych zaktualizowana. Zbudowano: ' + SHEET_WYNIKI + '.';
   ss.toast(msg, 'Inicjalizacja zakończona', 6);
@@ -316,6 +327,12 @@ function ensureUstawienia_(ss) {
   // E. Wartości skrajne
   writeSekcjaSkrajne_(sh);
 
+  // F. Analiza w kategoriach
+  writeSekcjaPodzial_(sh);
+
+  // G. Powtarzający się zawodnicy
+  writeSekcjaPowtorzenia_(sh);
+
   // Szerokości kolumn
   [[1, 170], [2, 110], [3, 110], [4, 30], [5, 30], [6, 190], [7, 220]]
     .forEach(([col, w]) => sh.setColumnWidth(col, w));
@@ -361,6 +378,77 @@ function ensureNamedRanges_(ss) {
     fixed.push(name);
   });
   return fixed;
+}
+
+/** Podział na kategorie w analizie „Korelacje (kategorie)”. */
+const PODZIALY = ['Klasa wagowa', 'Klasa wagowa × poziom', 'Zawody × kategoria'];
+
+/** Granice klas wagowych (kg): do granicy = klasa „65” / „85”, powyżej = „+65” / „+85”. */
+const KLASY_WAGOWE = { K: 65, M: 85 };
+
+/** Sekcja F Ustawień — sposób podziału na kategorie w analizie w kategoriach. */
+function writeSekcjaPodzial_(sh) {
+  const R = U_ROWS;
+  const ss = sh.getParent();
+  styleSection_(sh.getRange('A' + R.fHead + ':C' + R.fHead), 'F. Analiza w kategoriach');
+  sh.getRange('A' + R.fPodzial).setValue('Podział na kategorie').setFontWeight('bold');
+  styleInput_(sh.getRange(U.podzial).setValue(PODZIALY[0]));
+  sh.getRange(U.podzial).setDataValidation(SpreadsheetApp.newDataValidation()
+    .requireValueInList(PODZIALY, true).setAllowInvalid(false).build());
+  sh.getRange('A' + R.fHead).setNote(
+    'Jak dzielić dane w 📊 Analiza → Oblicz korelacje w kategoriach:\n'
+    + '• Klasa wagowa — K 65, K +65, M 85, M +85 (AMATOR i PRO oraz roczniki razem)\n'
+    + '• Klasa wagowa × poziom — np. AMATOR K +65 i PRO K +65 osobno\n'
+    + '• Zawody × kategoria — każda kategoria każdych zawodów osobno (najdrobniejszy podział)\n\n'
+    + 'Kategoria bez klasy wagowej (np. PRO KOBIET w PP 2024) → klasa wg wagi zawodnika (granice: K 65 kg, M 85 kg).');
+  sh.getRange('C' + R.fPodzial).setValue('wybierz z listy').setFontStyle('italic').setFontColor(STYLE.noteFont);
+  try { ss.removeNamedRange('PODZIAL_KATEGORII'); } catch (e) { /* nie istniał */ }
+  ss.setNamedRange('PODZIAL_KATEGORII', sh.getRange(U.podzial));
+}
+
+/** Dopisuje sekcję F do istniejących Ustawień, jeśli jej brak. @return {boolean} */
+function ensureSekcjaPodzial_(ss) {
+  const sh = ss.getSheetByName(SHEET_USTAWIENIA);
+  if (!sh || namedRange_(ss, 'PODZIAL_KATEGORII')) return false;
+  if (String(sh.getRange('A' + U_ROWS.fHead).getValue()).trim() !== '') return false;
+  writeSekcjaPodzial_(sh);
+  return true;
+}
+
+/**
+ * Powtarzający się zawodnicy (ta sama osoba na kilku zawodach) — opcje sekcji G Ustawień.
+ * [0] = wszystkie starty (każdy start to osobna obserwacja), [1] = tylko najnowszy start w danym boju.
+ */
+const POWTORZENIA_OPCJE = ['Wszystkie starty', 'Najnowszy start'];
+
+/** Sekcja G Ustawień — co robić z zawodnikami, którzy startowali na kilku zawodach. */
+function writeSekcjaPowtorzenia_(sh) {
+  const R = U_ROWS;
+  const ss = sh.getParent();
+  styleSection_(sh.getRange('A' + R.gHead + ':C' + R.gHead), 'G. Powtarzający się zawodnicy');
+  sh.getRange('A' + R.gPowt).setValue('Starty zawodnika').setFontWeight('bold');
+  styleInput_(sh.getRange(U.powtorzenia).setValue(POWTORZENIA_OPCJE[0]));
+  sh.getRange(U.powtorzenia).setDataValidation(SpreadsheetApp.newDataValidation()
+    .requireValueInList(POWTORZENIA_OPCJE, true).setAllowInvalid(false).build());
+  sh.getRange('A' + R.gHead).setNote(
+    'Ta sama osoba startowała na kilku zawodach (np. MP 2025 i MP 2026):\n'
+    + '• Wszystkie starty — każdy start to osobna obserwacja (p i CI mogą być zbyt optymistyczne)\n'
+    + '• Najnowszy start — w każdym boju zostaje tylko wynik z najnowszych zawodów, na których zawodnik ma wynik w tym boju\n\n'
+    + 'Działa w obu analizach (📊 Analiza), po filtrze Zawody, przed odrzuceniem wartości skrajnych. '
+    + 'Zawodnik = imię + nazwisko (bez względu na wielkość liter i polskie znaki). '
+    + 'Kolejność zawodów — rok z nazwy zawodów (np. „MP 2026 Bochnia” → 2026).');
+  sh.getRange('C' + R.gPowt).setValue('wybierz z listy').setFontStyle('italic').setFontColor(STYLE.noteFont);
+  try { ss.removeNamedRange('POWTORZENIA'); } catch (e) { /* nie istniał */ }
+  ss.setNamedRange('POWTORZENIA', sh.getRange(U.powtorzenia));
+}
+
+/** Dopisuje sekcję G do istniejących Ustawień, jeśli jej brak (komórka nagłówka pusta). @return {boolean} */
+function ensureSekcjaPowtorzenia_(ss) {
+  const sh = ss.getSheetByName(SHEET_USTAWIENIA);
+  if (!sh || namedRange_(ss, 'POWTORZENIA')) return false;
+  if (String(sh.getRange('A' + U_ROWS.gHead).getValue()).trim() !== '') return false;
+  writeSekcjaPowtorzenia_(sh);
+  return true;
 }
 
 /** Wartości startowe filtra wartości skrajnych. */

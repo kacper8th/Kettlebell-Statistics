@@ -15,7 +15,7 @@ Zasady (patrz Obsidian: Kettlebell Statystyki / Instrukcja dla AI → „Procedu
 - boje: TGU, SSP, 2KBSQ, Pistol, Pull-Up, Snatch (Snatch dostaje nazwę z --snatch, np. "Snatch 2'")
 - Wynik: boje siłowe = Max próba (Pull-Up = obciążenie dodatkowe); Snatch = Total (tonaż)
 - Pull-Up: BW% zawsze jako (waga + obciążenie) / waga (PDF 2025 podaje obciążenie / waga — przeliczane +100%)
-- wyniki 0 są pomijane
+- wyniki 0 są pomijane; --pomin BÓJ wyklucza cały bój (PP 2024: --pomin 2KBSQ — przysiad 1RM zamiast 3RM)
 - nazwiska w pisowni tytułowej; nazwiska łamane na dwie linie są sklejane (z myślnikiem bez spacji)
 - kontrola strukturalna: liczba zawodników = liczba wierszy klasyfikacji końcowej
 """
@@ -303,6 +303,8 @@ def main():
     ap.add_argument("--zawody", required=True, help='nazwa zawodów, np. "MP 2026 Bochnia"')
     ap.add_argument("--snatch", required=True, help="nazwa boju Snatch, np. \"Snatch 2'\"")
     ap.add_argument("--out", help="plik wyjściowy (domyślnie: <Zawody>_<Kategoria>.csv)")
+    ap.add_argument("--pomin", action="append", default=[], metavar="BÓJ",
+                    help="pomiń bój (można powtórzyć), np. --pomin 2KBSQ — PP 2024: przysiad 1RM, nieporównywalny z 3RM")
     args = ap.parse_args()
 
     src = Path(args.pdf)
@@ -327,11 +329,11 @@ def main():
     if is_layout_2024(text):
         all_rows, notes = parse_2024(text)
         warnings += notes
-        rows = [r for r in all_rows if r["wynik"] > 0 and r["bw"]]
+        rows = [r for r in all_rows if r["wynik"] > 0 and r["bw"] and r["boj"] not in args.pomin]
         n_final = final_count_2024(text)
     else:
         all_rows = parse_sections(text)
-        rows = [r for r in all_rows if r["wynik"] > 0]
+        rows = [r for r in all_rows if r["wynik"] > 0 and r["boj"] not in args.pomin]
         n_final = final_count(text)
 
     athletes = Counter((r["imie"], r["nazwisko"]) for r in all_rows)
