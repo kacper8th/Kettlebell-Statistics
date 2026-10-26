@@ -12,7 +12,7 @@ const SHEET_DANE = 'Dane';
 const SHEET_WYNIKI = 'Wyniki';
 
 /** Kolejność zakładek w arkuszu (pozostałe zakładki trafiają za nimi). */
-const SHEET_ORDER = [SHEET_USTAWIENIA, SHEET_DANE, SHEET_WYNIKI];
+const SHEET_ORDER = [SHEET_USTAWIENIA, SHEET_DANE, SHEET_WYNIKI, 'Korelacje', 'Odrzucone'];
 
 /** Zakres wierszy obejmowany formułami zakładek wyliczanych (wiersze Danych 2…MAX_ROWS). */
 const MAX_ROWS = 5000;
@@ -91,7 +91,8 @@ const U_ROWS = (() => {
   const cLast = cFirst + B_TESTOWE_START.length - 1;
   const dHead = cLast + 2;                             // nagłówek sekcji D
   return { bHead: bFirst - 2, bCols: bFirst - 1, bFirst, bLast, cHead, cFirst, cLast,
-           dHead, skanStart: dHead + 1, skanKrok: dHead + 2, skanKoniec: dHead + 3 };
+           dHead, skanStart: dHead + 1, skanKrok: dHead + 2, skanKoniec: dHead + 3,
+           eHead: dHead + 5, eOn: dHead + 6, eMetoda: dHead + 7, eProg: dHead + 8 };
 })();
 
 /** Adresy komórek w Ustawieniach. */
@@ -104,6 +105,9 @@ const U = {
   skanStart:      'B' + U_ROWS.skanStart,
   skanKrok:       'B' + U_ROWS.skanKrok,
   skanKoniec:     'B' + U_ROWS.skanKoniec,
+  skrajneOn:      'B' + U_ROWS.eOn,
+  skrajneMetoda:  'B' + U_ROWS.eMetoda,
+  skrajneProg:    'B' + U_ROWS.eProg,
   listaZawodow:   'F5:F200',
   listaKategorii: 'G5:G200',
 };
@@ -119,6 +123,9 @@ const NAMED_RANGES = {
   B_TEST_3:         U.bTest[2],
   SKAN_START:       U.skanStart,
   SKAN_KROK:        U.skanKrok,
+  SKRAJNE_ODRZUCAJ: U.skrajneOn,
+  SKRAJNE_METODA:   U.skrajneMetoda,
+  SKRAJNE_PROG:     U.skrajneProg,
 };
 
 // ---------------------------------------------------------------- Menu i Inicjalizacja
@@ -133,6 +140,9 @@ function onOpen() {
     .addItem('Importuj CSV', 'showImportDialog')
     .addItem('Policz wagi', 'computeWeights')
     .addToUi();
+  ui.createMenu('📊 Analiza')
+    .addItem('Oblicz korelacje', 'computeCorrelations')
+    .addToUi();
 }
 
 /** Inicjalizacja — konfiguruje arkusz. Bezpieczna do wielokrotnego uruchamiania. */
@@ -143,6 +153,8 @@ function setupTemplate() {
   if (ensureUstawienia_(ss)) created.push(SHEET_USTAWIENIA);
   if (ensureDane_(ss)) created.push(SHEET_DANE);
   const addedCols = ensureDaneHeaders_(ss);
+  const addedE = ensureSekcjaSkrajne_(ss);
+  const fixedNames = ensureNamedRanges_(ss);
   applyDaneRules_(ss);
   buildWyniki_(ss);
   removeDefaultSheet_(ss);
@@ -150,6 +162,8 @@ function setupTemplate() {
 
   const msg = (created.length ? 'Utworzono: ' + created.join(', ') + '.' : 'Zakładki z danymi już istnieją — dane bez zmian.')
     + (addedCols.length ? ' Dodano kolumny w Danych: ' + addedCols.join(', ') + '.' : '')
+    + (addedE ? ' Dodano w Ustawieniach sekcję E (wartości skrajne).' : '')
+    + (fixedNames.length ? ' Naprawiono zakresy nazwane: ' + fixedNames.join(', ') + '.' : '')
     + ' Walidacja Danych zaktualizowana. Zbudowano: ' + SHEET_WYNIKI + '.';
   ss.toast(msg, 'Inicjalizacja zakończona', 6);
 }
@@ -219,7 +233,7 @@ function applyDaneRules_(ss) {
   const nonNeg = help => warn(SpreadsheetApp.newDataValidation()
     .requireNumberGreaterThanOrEqualTo(0).setHelpText(help));
 
-  const boje = ss.getRangeByName('B_OFICJALNE_BOJE');
+  const boje = namedRange_(ss, 'B_OFICJALNE_BOJE');
   const bojRule = boje
     ? SpreadsheetApp.newDataValidation().requireValueInRange(boje, true)
     : SpreadsheetApp.newDataValidation().requireValueInList(B_OFICJALNE_START.map(r => r[0]), true);
@@ -299,6 +313,9 @@ function ensureUstawienia_(ss) {
     .setNumberFormat('0.00');
   sh.getRange('C' + R.skanKoniec).setValue(SKAN_KROKI + ' kroków').setFontStyle('italic').setFontColor(STYLE.noteFont);
 
+  // E. Wartości skrajne
+  writeSekcjaSkrajne_(sh);
+
   // Szerokości kolumn
   [[1, 170], [2, 110], [3, 110], [4, 30], [5, 30], [6, 190], [7, 220]]
     .forEach(([col, w]) => sh.setColumnWidth(col, w));
@@ -309,6 +326,91 @@ function ensureUstawienia_(ss) {
     ss.setNamedRange(name, sh.getRange(a1));
   });
 
+  return true;
+}
+
+/** Zakres nazwany albo null, gdy nie istnieje (getRangeByName potrafi wtedy rzucić wyjątek). */
+function namedRange_(ss, name) {
+  try {
+    return ss.getRangeByName(name) || null;
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * Pilnuje, żeby każdy zakres nazwany wskazywał na właściwe komórki w zakładce Ustawienia.
+ * Naprawia nazwy uszkodzone (np. po ręcznym usunięciu zakładki Ustawienia, gdy inne zakładki już istniały).
+ * @return {string[]} nazwy naprawionych zakresów
+ */
+function ensureNamedRanges_(ss) {
+  const sh = ss.getSheetByName(SHEET_USTAWIENIA);
+  if (!sh) return [];
+  const fixed = [];
+  Object.entries(NAMED_RANGES).forEach(([name, a1]) => {
+    let ok = false;
+    try {
+      const r = namedRange_(ss, name);
+      ok = !!r && r.getSheet().getSheetId() === sh.getSheetId() && r.getA1Notation() === a1;
+    } catch (e) {
+      ok = false;
+    }
+    if (ok) return;
+    ss.getNamedRanges().filter(n => n.getName() === name).forEach(n => n.remove());
+    ss.setNamedRange(name, sh.getRange(a1));
+    fixed.push(name);
+  });
+  return fixed;
+}
+
+/** Wartości startowe filtra wartości skrajnych. */
+const SKRAJNE_START = { on: 'NIE', metoda: 'MAD', prog: 3.5 };
+const SKRAJNE_METODY = ['MAD', 'SD'];
+
+/**
+ * Sekcja E Ustawień — odrzucanie wartości skrajnych (reszty z regresji log-log w grupie bój | płeć).
+ * Zapisuje treść sekcji i jej zakresy nazwane.
+ */
+function writeSekcjaSkrajne_(sh) {
+  const R = U_ROWS;
+  const ss = sh.getParent();
+  styleSection_(sh.getRange('A' + R.eHead + ':C' + R.eHead), 'E. Wartości skrajne');
+  sh.getRange('A' + R.eOn + ':A' + R.eProg)
+    .setValues([['Odrzucaj skrajne'], ['Metoda'], ['Próg']]).setFontWeight('bold');
+  styleInput_(sh.getRange(U.skrajneOn + ':' + U.skrajneProg)
+    .setValues([[SKRAJNE_START.on], [SKRAJNE_START.metoda], [SKRAJNE_START.prog]]));
+  sh.getRange(U.skrajneOn).setDataValidation(SpreadsheetApp.newDataValidation()
+    .requireValueInList(['TAK', 'NIE'], true).setAllowInvalid(false).build());
+  sh.getRange(U.skrajneMetoda).setDataValidation(SpreadsheetApp.newDataValidation()
+    .requireValueInList(SKRAJNE_METODY, true).setAllowInvalid(false).build());
+  sh.getRange(U.skrajneProg).setNumberFormat('0.0').setDataValidation(SpreadsheetApp.newDataValidation()
+    .requireNumberBetween(1, 10).setAllowInvalid(false).setHelpText('Liczba od 1 do 10').build());
+  sh.getRange('A' + R.eHead).setNote(
+    'W każdej grupie (bój | płeć) dopasowujemy prostą ln(ciężar) względem ln(waga). '
+    + 'Zawodnik, którego wynik odbiega od oczekiwanego dla jego wagi o więcej niż „Próg” (w jednostkach odchylenia), '
+    + 'jest pomijany w analizie — w obie strony (bardzo słaby i bardzo mocny wynik).\n\n'
+    + 'MAD = odporny z-score (mediana i medianowe odchylenie bezwzględne), zalecany próg 3,5.\n'
+    + 'SD = zwykły z-score (średnia i odchylenie standardowe), typowy próg 3.\n\n'
+    + 'Odrzuconych zawodników pokazuje zakładka „Odrzucone” (po 📊 Analiza → Oblicz korelacje).');
+  sh.getRange('C' + R.eOn).setValue('TAK = pomijaj skrajne w analizie').setFontStyle('italic').setFontColor(STYLE.noteFont);
+  sh.getRange('C' + R.eMetoda).setValue('MAD (odporny) albo SD').setFontStyle('italic').setFontColor(STYLE.noteFont);
+  sh.getRange('C' + R.eProg).setValue('MAD: 3,5; SD: 3').setFontStyle('italic').setFontColor(STYLE.noteFont);
+  [['SKRAJNE_ODRZUCAJ', U.skrajneOn], ['SKRAJNE_METODA', U.skrajneMetoda], ['SKRAJNE_PROG', U.skrajneProg]]
+    .forEach(([name, a1]) => {
+      try { ss.removeNamedRange(name); } catch (e) { /* nie istniał */ }
+      ss.setNamedRange(name, sh.getRange(a1));
+    });
+}
+
+/**
+ * Dopisuje sekcję E do istniejących Ustawień, jeśli jej brak (komórka nagłówka pusta). Nie zmienia innych wartości.
+ * @return {boolean} true, jeśli dopisano
+ */
+function ensureSekcjaSkrajne_(ss) {
+  const sh = ss.getSheetByName(SHEET_USTAWIENIA);
+  if (!sh || namedRange_(ss, 'SKRAJNE_ODRZUCAJ')) return false;
+  if (String(sh.getRange('A' + U_ROWS.eHead).getValue()).trim() !== '') return false;   // coś tam już jest — nie nadpisuj
+  writeSekcjaSkrajne_(sh);
   return true;
 }
 

@@ -188,7 +188,7 @@ function parseImportCsv_(text) {
 
 /** Lista dozwolonych bojów — z Ustawień (B_OFICJALNE_BOJE), a gdy jej brak, z wartości startowych. */
 function validBoje_() {
-  const r = SpreadsheetApp.getActiveSpreadsheet().getRangeByName('B_OFICJALNE_BOJE');
+  const r = namedRange_(SpreadsheetApp.getActiveSpreadsheet(), 'B_OFICJALNE_BOJE');
   const list = r ? r.getValues().map(v => String(v[0]).trim()).filter(Boolean) : [];
   return list.length ? list : B_OFICJALNE_START.map(v => v[0]);
 }
