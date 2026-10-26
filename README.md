@@ -34,6 +34,7 @@ wynik = ciężar / waga_zawodnika ^ b
 - **📥 Dane → Importuj CSV**, **Policz wagi**
 - **📊 Analiza → Oblicz korelacje**, **Oblicz korelacje w kategoriach**, **Oblicz korelacje w klasach (symulacja)** (granice klas i schemat b w Ustawieniach, sekcja H); w sekcji B: „Analizuj” i „Typ” boju (średnie dla bojów siłowych / wydolnościowych)
 - **📊 Analiza → Bootstrap (przedziały ufności)** — losowanie zawodników ze zwracaniem, 95% CI dla b neutralnego i ρ (Ustawienia, sekcja I: liczba powtórzeń, ziarno)
+- Ustawienia, sekcja J: **miara główna** — r Pearsona (wartości, domyślnie) albo ρ Spearmana (miejsca)
 - **📊 Analiza → Wykres ρ(b)** — krzywe ρ w funkcji b dla kategorii oficjalnych (A) i klas z symulacji (B), osobno boje siłowe / wydolnościowe
 
 ## Praca z kodem
@@ -60,6 +61,7 @@ node tools/test_analiza.js --powtorzenia najnowszy
 node tools/test_analiza.js --klasy "K:58,65,72;M:75,85,95"
 node tools/test_analiza.js --klasy "K:65;M:85" --schemat "K:,0.25;M:,0" --boje "TGU,SSP,2KBSQ"
 node tools/test_analiza.js --bootstrap 200 --ziarno 1
+node tools/test_analiza.js --miara rho
 ```
 
 Dokumentacja projektu: Obsidian, `02-Praca/Projekty/Kettlebell Statystyki`.

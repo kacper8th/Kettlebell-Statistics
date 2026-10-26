@@ -7,13 +7,14 @@
  *   node tools/test_analiza.js [--dane dane] [--zawody "MP 2026 Bochnia"] [--kategoria "AMATOR KOBIET +65 KG"]
  *                              [--podzial 0|1|2] [--skrajne MAD:3|SD:3|off] [--testy 0.5,0.67,0.75]
  *                              [--powtorzenia wszystkie|najnowszy] [--klasy "K:58,65,72;M:75,85,95"]
- *                              [--boje "TGU,SSP,2KBSQ"] [--schemat "K:,0.25;M:,0"] [--bootstrap 200 [--ziarno 1]]
+ *                              [--boje "TGU,SSP,2KBSQ"] [--schemat "K:,0.25;M:,0"] [--bootstrap 200 [--ziarno 1]] [--miara r|rho]
  *
  *   --podzial: 0 = Klasa wagowa (domyślnie), 1 = Klasa wagowa × poziom, 2 = Zawody × kategoria
  *   --powtorzenia: wszystkie starty (domyślnie) albo tylko najnowszy start zawodnika w każdym boju (Ustawienia, sekcja G)
  *   --klasy: granice symulacji klas wagowych (Ustawienia, sekcja H), do 3 na płeć; domyślnie "K:65;M:85"
  *   --schemat: b dla klas symulacji (klasa 1 = najlżejsza; puste = b oficjalny), algorytm „Schemat” w Korelacje (wagi)
  *   --bootstrap: liczba powtórzeń bootstrapu po zawodnikach (zakładka Bootstrap); bez parametru bootstrap się nie liczy
+ *   --miara: r (Pearson, domyślnie) albo rho (Spearman) — miara główna (Ustawienia, sekcja J)
  *   --boje: boje do analizy (Ustawienia, sekcja B, kolumna „Analizuj”); domyślnie wszystkie
  *
  * Co robi:
@@ -39,6 +40,7 @@ const testy = opt('testy', '0.5,0.67,0.75').split(',').map(Number);
 const powtArg = opt('powtorzenia', 'wszystkie');
 if (['wszystkie', 'najnowszy'].indexOf(powtArg) < 0) { console.error('--powtorzenia: wszystkie albo najnowszy'); process.exit(1); }
 const najnowszy = powtArg === 'najnowszy';
+const miaraArg = opt('miara', 'r');   // r = Pearson (domyślnie), rho = Spearman — Ustawienia, sekcja J
 // granice symulacji klas wagowych (Ustawienia, sekcja H), np. "K:58,65,72;M:75,85,95"
 const klasyArg = opt('klasy', 'K:65;M:85');
 const klasyVals = [[], [], []];
@@ -134,6 +136,7 @@ const ctx = {
   typBoju: B_OFICJALNE_START.reduce((o, r) => { o[r[0]] = typBojuStart_(r[0]); return o; }, {}),
   boje: { wybrane: B_OFICJALNE_START.map(r => r[0]).filter(b => bojeWybrane.indexOf(b) >= 0), wszystkich: B_OFICJALNE_START.length },
 };
+MIARA_ = miaraArg === 'rho' ? 'rho' : 'r';
 analysisContext_ = () => ctx;
 writeOdrzucone_ = () => {};
 let kor, kat;
@@ -150,17 +153,17 @@ const f3 = v => typeof v === 'number' ? (v >= 0 ? ' ' : '') + v.toFixed(3) : Str
 const f2 = v => typeof v === 'number' ? v.toFixed(2) : String(v);
 console.log(`Dane: ${dane.length} wierszy, policzono wag: ${wagi.filled} | zawody = ${filtrZawody}, kategoria = ${filtrKategoria}`
   + ` | skrajne: ${skrajneArg} | podział: ${ctx.podzial} | testy b: ${testy.join(', ')}`
-  + ` | boje: ${bojeArg || 'wszystkie'} | powtórzenia: ${powtArg}` + (najnowszy ? ` (pominięto: łącznie ${dRows.dropped.length}, w kategoriach ${dValid.dropped.length})` : ''));
+  + ` | miara: ${miaraSym_()} | boje: ${bojeArg || 'wszystkie'} | powtórzenia: ${powtArg}` + (najnowszy ? ` (pominięto: łącznie ${dRows.dropped.length}, w kategoriach ${dValid.dropped.length})` : ''));
 console.log('\n== Korelacje (łącznie) — r Pearsona: b=0, b=1, b ofic. | ρ ofic.');
 kor.filter(g => g.algos.length).forEach(g => console.log(`  ${g.key.padEnd(14)} n=${String(g.n).padStart(3)}  r: ${f3(g.algos[0].r)} ${f3(g.algos[1].r)} ${f3(g.algos[2].r)} | ρ ofic ${f3(g.algos[2].rho)}`));
-const line = g => `  ${g.key.padEnd(18)} n=${String(g.n).padStart(3)}  ρ: b=0 ${f3(g.algos[0].rho)}  b=1 ${f3(g.algos[1].rho)}  ofic ${f3(g.algos[2].rho)} (p ${f2(g.algos[2].p)})`
-  + (g.algos[6] ? `  schemat ${f3(g.algos[6].rho)} (p ${f2(g.algos[6].p)})` : '') + `  | b neutralne ${f2(g.bNeutral)} | ${g.closest}`;
+const line = g => `  ${g.key.padEnd(18)} n=${String(g.n).padStart(3)}  ${miaraSym_()}: b=0 ${f3(g.algos[0].m)}  b=1 ${f3(g.algos[1].m)}  ofic ${f3(g.algos[2].m)} (p ${f2(g.algos[2].mp)})`
+  + (g.algos[6] ? `  schemat ${f3(g.algos[6].m)} (p ${f2(g.algos[6].mp)})` : '') + `  | b neutralne ${f2(g.bNeutral)} | ${g.closest}`;
 console.log('\n== Korelacje (kategorie) — tabela 1: wg płci');
 kat.g.filter(g => g.k).forEach(g => console.log(line(g)));
 console.log('\n== Korelacje (kategorie) — tabela 2: wg klas wagowych');
 kat.cl.filter(g => g.k).forEach(g => console.log(line(g)));
-const lineT = g => `  ${g.key.padEnd(30)} bojów ${g.k} n=${String(g.n).padStart(4)}  ρ: b=0 ${f3(g.algos[0].rho)}  b=1 ${f3(g.algos[1].rho)}  ofic ${f3(g.algos[2].rho)}`
-  + (g.algos[6] ? `  schemat ${f3(g.algos[6].rho)}` : '') + `  | b neutralne ${f2(g.bNeutral)} | b ofic ${f2(g.bOfic)}`;
+const lineT = g => `  ${g.key.padEnd(30)} bojów ${g.k} n=${String(g.n).padStart(4)}  ${miaraSym_()}: b=0 ${f3(g.algos[0].m)}  b=1 ${f3(g.algos[1].m)}  ofic ${f3(g.algos[2].m)}`
+  + (g.algos[6] ? `  schemat ${f3(g.algos[6].m)}` : '') + `  | b neutralne ${f2(g.bNeutral)} | b ofic ${f2(g.bOfic)}`;
 console.log('\n== Korelacje (kategorie) — średnio z bojów: klasa × typ, płeć × typ');
 kat.ty.klasy.concat(kat.ty.plcie).filter(g => g.k).forEach(g => console.log(lineT(g)));
 console.log(`\n== Korelacje (wagi) — symulacja klas: ${klasyArg} | schemat: ${schematArg || 'oficjalny'}`);
@@ -185,7 +188,7 @@ odrz('Korelacje (wagi)', wag.rejectedList || []);
   writeWykres_ = (ss, c, b) => { wyk = b; };
   const t0 = Date.now();
   computeRhoCurves();
-  console.log(`\n== Wykres ρ(b) — ${wyk.length} wykresów (${Date.now() - t0} ms); ρ przy b = −0,05 / 0 / 0,05 / b ofic. / 1`);
+  console.log(`\n== Wykres ${miaraSym_()}(b) — ${wyk.length} wykresów (${Date.now() - t0} ms); ${miaraSym_()} przy b = −0,05 / 0 / 0,05 / b ofic. / 1`);
   wyk.forEach(bl => {
     const at = b => bl.rows.find(r => Math.abs(r[0] - b) < 1e-9);
     bl.series.forEach((s, i) => {
@@ -206,6 +209,6 @@ if (opt('bootstrap', '')) {
   [['klasaBoj', 'klasa × bój'], ['plecBoj', 'płeć × bój'], ['klasaTyp', 'klasa × typ'], ['plecTyp', 'płeć × typ']].forEach(([t, title]) => {
     console.log('  -- ' + title);
     boot.tables[t].forEach(g => console.log(`  ${g.key.padEnd(30)} b ofic ${fB(g.bOfic)}  b neutr ${fB(g.bNeutral).padStart(6)}  CI ${ciT(g.bnCI).padEnd(14)}`
-      + `  ρ ofic ${f3(g.ofic)} CI ${ciT(g.oficCI)} p ${f2(g.oficCI.p)}` + (g.sch !== '' ? `  ρ sch ${f3(g.sch)} p ${f2(g.schCI.p)}` : '')));
+      + `  ${miaraSym_()} ofic ${f3(g.ofic)} CI ${ciT(g.oficCI)} p ${f2(g.oficCI.p)}` + (g.sch !== '' ? `  ${miaraSym_()} sch ${f3(g.sch)} p ${f2(g.schCI.p)}` : '')));
   });
 }

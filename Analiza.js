@@ -25,6 +25,28 @@ const ALGOS = [
   { col: W.t3,         label: 'Test 3', test: 'B_TEST_3' },
 ];
 
+/**
+ * Miara główna korelacji (Ustawienia, sekcja J), ustawiana w analysisContext_:
+ * 'r' = Pearson (wartości wyników — domyślnie), 'rho' = Spearman (miejsca w rankingu; skok przy b = 0 przez remisy).
+ * Od niej zależą: b neutralne, „najbliżej 0”, p i CI w tabelach, bootstrap, krzywe na wykresie.
+ */
+var MIARA_ = 'r';
+
+/** Zdanie do legend: która miara jest główna i dlaczego. */
+function miaraOpis_() {
+  return MIARA_ === 'rho'
+    ? 'Miara główna: ρ Spearmana (miejsca w rankingu — odporna na pojedyncze skrajne osoby, ale remisy przy b = 0 dają skok); r (Pearson, szary) — pomocniczo.'
+    : 'Miara główna: r Pearsona (wartości wyników — bez skoku przy b = 0 przez remisy); ρ (Spearman, szary) — pomocniczo. Zmiana: Ustawienia, sekcja J.';
+}
+
+/** Symbol miary głównej / pomocniczej do nagłówków. */
+function miaraSym_() { return MIARA_ === 'rho' ? 'ρ' : 'r'; }
+function miaraSym2_() { return MIARA_ === 'rho' ? 'r' : 'ρ'; }
+
+/** Korelacja miary głównej i mnożnik wariancji z = atanh(·) (Spearman 1,06). */
+function corrMain_(x, y) { return MIARA_ === 'rho' ? spearman_(x, y) : pearson_(x, y); }
+function varMain_() { return MIARA_ === 'rho' ? SPEARMAN_VAR : 1; }
+
 /** Minimalna liczebność grupy, dla której liczymy statystyki. */
 const MIN_N = 5;
 
@@ -373,7 +395,7 @@ function writeKorWagi_(ss, ctx, res) {
     'Schemat: ciężar / waga ^ b klasy z Ustawień (sekcja H, „b w schemacie”); puste pole = b oficjalny boju. Tabela 3 pokazuje, jak cały schemat działa razem.',
     'Klasa zawodnika wg jego wagi na danych zawodach (mediana wag z bojów); waga równa granicy należy do wyższej klasy (85,0 → 85+).',
     'Uwaga: wagi pochodzą z zawodów z obecnymi klasami (zbijanie do 85 / 65, starty tuż nad granicą) — przy innych granicach zawodnicy mogliby zachowywać się inaczej.',
-    'ρ (Spearman) — wskaźnik główny; r (Pearson, szary) — pomocniczo. b neutralne (ρ = 0) szukane od −1 do 2 co 0,01.',
+    miaraOpis_() + ' b neutralne (' + miaraSym_() + ' = 0) szukane od −1 do 2.',
     'Tabela 3: korelacje z klas uśrednione (z = atanh, wagi n − 3) — jak dany algorytm sprawdza się w całym systemie klas.',
     'Kolory: pomarańcz = faworyzuje lżejszych, zielony = neutralny, niebieski = cięższych; p < 0,05 na czerwono. Klasy z n < ' + MIN_N + ' bez statystyk (szare).',
   ].forEach((t, i) => sh.getRange(row + 2 + i, 1).setValue(t).setFontStyle('italic').setFontColor(STYLE.noteFont));
@@ -414,7 +436,7 @@ function poolByType_(ctx, entries, grpOrder, algos) {
       const usable = x => x.rho.length && x.rho.every(v => v !== '');
       const used = sel.filter(e => e.strata.some(usable));
       const pooled = poolStrata_(sel.reduce((a, e) => a.concat(e.strata), []), algos);
-      pooled.algos.forEach(a => { a.p = ''; a.lo = ''; a.hi = ''; });
+      pooled.algos.forEach(a => { a.p = ''; a.lo = ''; a.hi = ''; a.mp = ''; a.mlo = ''; a.mhi = ''; });
       const bs = unique_(used.map(e => e.bOfic));
       const typLabel = typ === TYPY_BOJOW[0] ? 'siłowe' : 'wydolnościowe';
       const label = (PLCIE.indexOf(grp) >= 0 ? grp + ' (wszystkie klasy)' : grp) + ' | ' + typLabel;
@@ -468,11 +490,11 @@ function computeRhoCurves() {
   ss.toast('Policzono krzywe ρ(b): ' + blocks.length + ' wykresów.', '📊 Analiza', 5);
 }
 
-/** ρ (uśrednione Fisherem) dla danego b w podanych warstwach (każda z polami w, c, n). */
+/** Korelacja miary głównej (uśredniona Fisherem) dla danego b w podanych warstwach (każda z polami w, c, n). */
 function rhoAtB_(strata, b) {
   return fisherPool_(strata.map(x => ({
-    r: spearman_(x.w, x.c.map((c, j) => c / Math.pow(x.w[j], b))), n: x.n,
-  })), SPEARMAN_VAR).r;
+    r: corrMain_(x.w, x.c.map((c, j) => c / Math.pow(x.w[j], b))), n: x.n,
+  })), varMain_()).r;
 }
 
 /**
@@ -542,13 +564,13 @@ function writeWykres_(ss, ctx, blocks) {
   sh.getRange(1, 1, sh.getMaxRows(), 30).setFontFamily(STYLE.font).setFontSize(10);
 
   const granice = PLCIE.map(p => p + ': ' + (ctx.klasySym[p].length ? ctx.klasySym[p].map(fmt2_).join(' / ') : 'brak')).join(', ');
-  sh.getRange('A1').setValue('Korelacja wyniku z wagą w funkcji b — ρ(b)').setFontSize(14).setFontWeight('bold');
+  sh.getRange('A1').setValue('Korelacja wyniku z wagą w funkcji b — ' + miaraSym_() + '(b)').setFontSize(14).setFontWeight('bold');
   sh.getRange('A2').setValue('A: kategorie oficjalne (podział: ' + ctx.podzial + ') | B: symulacja klas (sekcja H): ' + granice
     + ' | zawody = ' + ctx.filtrZawody + powtorzeniaInfo_(ctx, ctx.powtorzenia ? ctx.powtorzenia.pominietoValid : 0)
     + ' | wartości skrajne: ' + (ctx.skrajne.on ? ctx.skrajne.metoda + ', próg ' + fmt2_(ctx.skrajne.prog) : 'nie odrzucane'))
     .setFontWeight('bold');
   sh.getRange('A3').setValue('Obliczono: ' + Utilities.formatDate(new Date(), 'Europe/Warsaw', 'yyyy-MM-dd HH:mm')
-    + ' | ρ < 0 = faworyzuje lżejszych, ρ > 0 = cięższych; przecięcie z zerem = b neutralne; czerwona pionowa linia = b oficjalne')
+    + ' | ' + miaraSym_() + ' < 0 = faworyzuje lżejszych, > 0 = cięższych; przecięcie z zerem = b neutralne; czerwona pionowa linia = b oficjalne')
     .setFontColor(STYLE.noteFont);
   writeStaleCheck_(sh, 'A4', '📊 Analiza → Wykres ρ(b)', '&"|"&IFERROR(TEXTJOIN(";";FALSE;KLASY_SYM);"")');
 
@@ -572,7 +594,7 @@ function writeWykres_(ss, ctx, blocks) {
       const typTxt = b.typ === TYPY_BOJOW[0] ? 'boje siłowe' : 'boje wydolnościowe';
       const title = z + ' · ' + plecTxt + ' — ' + typTxt + (b.bOfic !== null ? ' (b ofic. = ' + fmt2_(b.bOfic) + ')' : '');
       // dane
-      const head = ['b'].concat(b.series.map(s => s.name), ['ρ = 0', 'b oficjalne']);
+      const head = ['b'].concat(b.series.map(s => s.name), [miaraSym_() + ' = 0', 'b oficjalne']);
       sh.getRange(dataRow, DATA_COL).setValue(title).setFontWeight('bold');
       styleHeader_(sh.getRange(dataRow + 1, DATA_COL, 1, head.length).setValues([head]).setWrap(true));
       const rng = sh.getRange(dataRow + 1, DATA_COL, b.rows.length + 1, head.length);
@@ -593,7 +615,7 @@ function writeWykres_(ss, ctx, blocks) {
         .setOption('useFirstColumnAsDomain', true)
         .setOption('interpolateNulls', false)
         .setOption('hAxis', { title: 'b (wykładnik masy ciała)', viewWindow: { min: B_SCAN.min, max: B_SCAN.max } })
-        .setOption('vAxis', { title: 'ρ (waga vs wynik)', viewWindow: { min: -1, max: 1 } })
+        .setOption('vAxis', { title: miaraSym_() + ' (waga vs wynik)', viewWindow: { min: -1, max: 1 } })
         .setOption('legend', { position: 'bottom' })
         .setOption('series', seriesOpt)
         .build();
@@ -604,8 +626,9 @@ function writeWykres_(ss, ctx, blocks) {
   });
 
   [
-    'Każda linia: ρ między wagą a wynikiem (ciężar / waga^b) przy danym b — boje danego typu i kategorie uśrednione Fisherem. „wszystkie klasy” = klasy tej płci razem (uśrednione, nie zmieszane).',
-    'Przecięcie z zerem = b neutralne. Skok przy b = 0: odważniki co 2–4 kg dają remisy przy b = 0, a każde b > 0 rozstrzyga je na korzyść lżejszego.',
+    miaraOpis_(),
+    'Każda linia: ' + miaraSym_() + ' między wagą a wynikiem (ciężar / waga^b) przy danym b — boje danego typu i kategorie uśrednione Fisherem. „wszystkie klasy” = klasy tej płci razem (uśrednione, nie zmieszane).',
+    'Przecięcie z zerem = b neutralne.' + (MIARA_ === 'rho' ? ' Skok przy b = 0: odważniki co 2–4 kg dają remisy przy b = 0, a każde b > 0 rozstrzyga je na korzyść lżejszego (przy r Pearsona skoku nie ma).' : ''),
     'Dane wykresów: od kolumny P (wiersz b oficjalnego podświetlony). Wybrane boje i typy — Ustawienia, sekcja B; klasy symulacji — sekcja H.',
   ].forEach((t, i) => sh.getRange(chartRow + 1 + i, 1).setValue(t).setFontStyle('italic').setFontColor(STYLE.noteFont));
   orderSheets_(ss);
@@ -679,8 +702,8 @@ function bootstrapAnalysis_(ctx) {
         if (!a || !g.k || !g.algos.length) return;
         const b = bnNum(g.bNeutral);
         if (b !== null) a.bn.push(b);
-        if (typeof g.algos[2].rho === 'number') a.ofic.push(g.algos[2].rho);
-        if (g.algos[6] && typeof g.algos[6].rho === 'number') a.sch.push(g.algos[6].rho);
+        if (typeof g.algos[2].m === 'number') a.ofic.push(g.algos[2].m);
+        if (g.algos[6] && typeof g.algos[6].m === 'number') a.sch.push(g.algos[6].m);
       }));
   };
 
@@ -720,7 +743,7 @@ function bootstrapAnalysis_(ctx) {
     tables[t] = list.filter(g => g.k && g.algos.length).map(g => {
       const a = acc[t + '§' + g.key];
       return { key: g.key, n: g.n, k: g.k, bOfic: g.bOfic, bNeutral: g.bNeutral, bnCI: ci(a.bn),
-        ofic: g.algos[2].rho, oficCI: ci(a.ofic), sch: g.algos[6] ? g.algos[6].rho : '', schCI: ci(a.sch) };
+        ofic: g.algos[2].m, oficCI: ci(a.ofic), sch: g.algos[6] ? g.algos[6].m : '', schCI: ci(a.sch) };
     });
   });
   return { tables: tables, done: done, requested: ctx.boot.n, ms: Date.now() - t0,
@@ -761,7 +784,7 @@ function writeBootstrap_(ss, ctx, res) {
     + '&"|"&IFERROR(BOOT_N&"/"&BOOT_SEED;"")');
 
   const head = ['Grupa', 'n', 'b oficjalny', 'b neutralne', '95% CI b neutralnego', 'b ofic. w CI?',
-    'ρ ofic.', '95% CI ρ ofic.', 'p (ofic.)', 'ρ schemat', '95% CI ρ schemat', 'p (schemat)'];
+    miaraSym_() + ' ofic.', '95% CI ' + miaraSym_() + ' ofic.', 'p (ofic.)', miaraSym_() + ' schemat', '95% CI ' + miaraSym_() + ' schemat', 'p (schemat)'];
   const fmtB = v => typeof v !== 'number' ? String(v) : (v === Infinity ? '> ' + fmt2_(B_SCAN.max)
     : v === -Infinity ? '< ' + fmt2_(B_SCAN.min) : fmt2_(v));
   const inCI = (b, c) => typeof b !== 'number' || c.lo === '' ? '' : (b >= c.lo && b <= c.hi ? 'TAK' : 'NIE');
@@ -812,7 +835,7 @@ function writeBootstrap_(ss, ctx, res) {
 
   [
     'Bootstrap: losowanie zawodników ze zwracaniem (osobno K i M), wylosowany zawodnik wnosi wszystkie swoje wyniki (boje i lata); w każdym powtórzeniu cała symulacja klas liczona od nowa, z filtrem wartości skrajnych.',
-    '95% CI = percentyle 2,5% i 97,5% z powtórzeń. p (bootstrap) = 2 × mniejsza z części powtórzeń z ρ ≤ 0 i ρ ≥ 0 — czy ρ różni się od 0.',
+    '95% CI = percentyle 2,5% i 97,5% z powtórzeń. p (bootstrap) = 2 × mniejsza z części powtórzeń z ' + miaraSym_() + ' ≤ 0 i ≥ 0 — czy korelacja różni się od 0. ' + miaraOpis_(),
     'b ofic. w CI?: TAK = oficjalny współczynnik jest zgodny z danymi (mieści się w przedziale b neutralnego); NIE (czerwone) = dane wskazują inne b.',
     'n i b neutralne — z prawdziwych danych (jak w Korelacjach (wagi)); „< −1,00” / „> 2,00” = b neutralne poza zakresem szukania.',
     'Tabele 3–4: p i CI uwzględniają, że ci sami zawodnicy występują w kilku bojach (w Korelacjach (wagi) są tam puste).',
@@ -858,7 +881,10 @@ function poolStrata_(st, algos) {
   A.forEach((a, i) => {
     const pr = fisherPool_(used.map(x => ({ r: x.r[i], n: x.n })));
     const ps = fisherPool_(used.map(x => ({ r: x.rho[i], n: x.n })), SPEARMAN_VAR);
-    res.algos.push({ r: pr.r, rho: ps.r, p: ps.p, lo: ps.lo, hi: ps.hi });
+    // m = miara główna (z p i 95% CI), s = pomocnicza; r / rho / p (ρ) zostają dla zgodności
+    const mm = MIARA_ === 'rho' ? ps : pr;
+    res.algos.push({ r: pr.r, rho: ps.r, p: ps.p, lo: ps.lo, hi: ps.hi,
+      m: mm.r, mp: mm.p, mlo: mm.lo, mhi: mm.hi, s: MIARA_ === 'rho' ? pr.r : ps.r });
   });
   let sxy = 0, sxx = 0;
   used.forEach(x => {
@@ -869,7 +895,7 @@ function poolStrata_(st, algos) {
   res.within = sxx > 0 ? sxy / sxx : '';
   res.bNeutral = neutralB_(used);
   let best = 0;
-  res.algos.forEach((a, i) => { if (Math.abs(a.rho) < Math.abs(res.algos[best].rho)) best = i; });
+  res.algos.forEach((a, i) => { if (Math.abs(a.m) < Math.abs(res.algos[best].m)) best = i; });
   res.closest = A[best].label;
   return res;
 }
@@ -887,8 +913,8 @@ const B_SCAN = { min: -1, max: 2, coarse: 0.1 };
  */
 function neutralB_(strata) {
   const rhoAt = b => fisherPool_(strata.map(x => ({
-    r: spearman_(x.w, x.c.map((c, j) => c / Math.pow(x.w[j], b))), n: x.n,
-  })), SPEARMAN_VAR).r;
+    r: corrMain_(x.w, x.c.map((c, j) => c / Math.pow(x.w[j], b))), n: x.n,
+  })), varMain_()).r;
   // siatka co B_SCAN.coarse, a po zmianie znaku bisekcja (zgodne ze skanem co 0,01 z dokładnością < 0,01; ~8× szybciej)
   let prevB = B_SCAN.min, prev = rhoAt(prevB);
   if (prev === '') return '';
@@ -1007,13 +1033,13 @@ function writeKorKat_(ss, ctx, groups, classRes, strata, typeRes, rejectedList) 
 
   // ---- Tabela 5: szczegóły per kategoria
   const D0 = row + 3;
-  sh.getRange(D0 - 2, 1).setValue('5. Szczegóły — ρ w każdej kategorii osobno (wg podziału z Ustawień, sekcja F)').setFontWeight('bold');
+  sh.getRange(D0 - 2, 1).setValue('5. Szczegóły — ' + miaraSym_() + ' w każdej kategorii osobno (wg podziału z Ustawień, sekcja F)').setFontWeight('bold');
   const dHead = ['Grupa', 'Kategoria (' + ctx.podzial + ')', 'n', 'odrzucono']
-    .concat(ALGOS.map((a, i) => 'ρ ' + algoTitle(a, i))).concat(['b neutralne (ρ = 0)', 'b z regresji']);
+    .concat(ALGOS.map((a, i) => miaraSym_() + ' ' + algoTitle(a, i))).concat(['b neutralne (' + miaraSym_() + ' = 0)', 'b z regresji']);
   styleHeader_(sh.getRange(D0 - 1, 1, 1, dHead.length).setValues([dHead]).setWrap(true));
   sh.setRowHeight(D0 - 1, 40);
   const det = strata.map(x => [x.grupa, x.kategoria, x.n, ctx.skrajne.on ? x.out : '']
-    .concat(x.rho.length ? x.rho : new Array(ALGOS.length).fill('')).concat([x.bNeutral, x.loglog]));
+    .concat(x.rho.length ? (MIARA_ === 'rho' ? x.rho : x.r) : new Array(ALGOS.length).fill('')).concat([x.bNeutral, x.loglog]));
   if (det.length) {
     const dr = sh.getRange(D0, 1, det.length, dHead.length).setValues(det);
     dr.setBorder(true, true, true, true, true, true, '#BFBFBF', SpreadsheetApp.BorderStyle.SOLID);
@@ -1028,10 +1054,10 @@ function writeKorKat_(ss, ctx, groups, classRes, strata, typeRes, rejectedList) 
   // ---- Legenda
   const L0 = D0 + det.length + 1;
   [
-    'ρ (Spearman) — wskaźnik główny: liczony z miejsc w rankingu, więc pojedyncza skrajna osoba nie może mocno zmienić wyniku. r (Pearson, szary) — pomocniczo; gdy r i ρ są zbliżone, wniosek jest pewny.',
-    'b neutralne (ρ = 0): wykładnik b, przy którym kolejność wyników (ciężar / waga^b) przestaje zależeć od wagi — szukany w zakresie od −1 do 2 co 0,01.',
+    miaraOpis_(),
+    'b neutralne (' + miaraSym_() + ' = 0): wykładnik b, przy którym wynik (ciężar / waga^b) przestaje zależeć od wagi — szukany w zakresie od −1 do 2.',
     'Tabela 2: klasa wagowa z nazwy kategorii („65 KG” / „+65 KG”); kategoria bez klasy (np. PRO KOBIET w PP 2024) — wg wagi zawodnika (granice K 65 kg, M 85 kg). Wiersze bez danych pominięte.',
-    'Uśrednienie: korelacja → z = atanh, średnia ważona n − 3, z powrotem tanh. p i 95% CI dla ρ z testu z (wariancja 1,06 / (n − 3)).',
+    'Uśrednienie: korelacja → z = atanh, średnia ważona n − 3, z powrotem tanh. p i 95% CI dla ' + miaraSym_() + ' z testu z (wariancja ' + (MIARA_ === 'rho' ? '1,06' : '1') + ' / (n − 3)).',
     'b z regresji: nachylenie ln(ciężar) względem ln(waga) w obrębie kategorii — wrażliwe na skrajne osoby, dlatego pomocniczo.',
     'Kolory: pomarańcz = faworyzuje lżejszych, zielony = neutralny, niebieski = cięższych; p < 0,05 na czerwono. Kategorie z n < ' + MIN_N + ' pominięte (szare).',
   ].forEach((t, i) => sh.getRange(L0 + i, 1).setValue(t).setFontStyle('italic').setFontColor(STYLE.noteFont));
@@ -1079,15 +1105,15 @@ function writeSummaryTable_(sh, ctx, top, title, labelHeader, items, algoTitle, 
   A.forEach((a, i) => {
     const c = FIX + 1 + i * 3;
     hdr(HR, c, 1, 3, algoTitle(a, i));
-    hdr(SR, c, 1, 1, 'ρ', true);
+    hdr(SR, c, 1, 1, miaraSym_(), true);
     hdr(SR, c + 1, 1, 1, 'p', true);
-    hdr(SR, c + 2, 1, 1, 'r', true);
+    hdr(SR, c + 2, 1, 1, miaraSym2_(), true);
   });
   const cx = FIX + 1 + A.length * 3;
-  hdr(HR, cx, 2, 1, 'b neutralne (ρ = 0)');
-  hdr(HR, cx + 1, 2, 1, '95% CI ρ (ofic.)');
+  hdr(HR, cx, 2, 1, 'b neutralne (' + miaraSym_() + ' = 0)');
+  hdr(HR, cx + 1, 2, 1, '95% CI ' + miaraSym_() + ' (ofic.)');
   hdr(HR, cx + 2, 2, 1, 'b z regresji (pomocniczo)');
-  hdr(HR, cx + 3, 2, 1, 'Najbliżej 0 (ρ)');
+  hdr(HR, cx + 3, 2, 1, 'Najbliżej 0 (' + miaraSym_() + ')');
   sh.setRowHeight(HR, 48);
   const nCols = cx + 3;
   if (!list.length) {
@@ -1098,9 +1124,9 @@ function writeSummaryTable_(sh, ctx, top, title, labelHeader, items, algoTitle, 
   const out = list.map(g => {
     const row = [g.key, g.k, g.n, ctx.skrajne.on ? g.out : '', g.bOfic];
     if (!g.algos.length) return row.concat(new Array(nCols - FIX).fill(''));
-    g.algos.forEach(a => row.push(a.rho, a.p, a.r));
+    g.algos.forEach(a => row.push(a.m, a.mp, a.s));
     const o = g.algos[2];
-    row.push(g.bNeutral, o.rho === '' || o.lo === '' ? '' : fmt3_(o.lo) + ' … ' + fmt3_(o.hi), g.within, g.closest);
+    row.push(g.bNeutral, o.m === '' || o.mlo === '' ? '' : fmt3_(o.mlo) + ' … ' + fmt3_(o.mhi), g.within, g.closest);
     return row;
   });
   const rng = sh.getRange(R0, 1, out.length, nCols).setValues(out);
@@ -1217,7 +1243,10 @@ function analysisContext_(ss) {
       + 'Dopisz rok do nazwy zawodów albo wybierz w Ustawieniach (sekcja G) „' + POWTORZENIA_OPCJE[0] + '”.');
     return null;
   }
+  const miaraTxt = String(opt('MIARA', MIARY[0]));
+  MIARA_ = miaraTxt === MIARY[1] ? 'rho' : 'r';
   return {
+    miara: MIARA_,
     rows: dRows.kept,
     valid: dValid.kept,
     powtorzenia: { najnowszy: najnowszy, pominietoRows: dRows.dropped.length, pominietoValid: dValid.dropped.length },
@@ -1297,7 +1326,7 @@ function powtorzeniaInfo_(ctx, dropped) {
   const b = ctx.boje;
   const boje = !b || b.wybrane.length === b.wszystkich ? 'wszystkie'
     : b.wybrane.join(', ') + ' (' + b.wybrane.length + ' z ' + b.wszystkich + ')';
-  return ' | boje: ' + boje + ' | powtórzenia: ' + (ctx.powtorzenia && ctx.powtorzenia.najnowszy
+  return ' | miara: ' + miaraSym_() + ' | boje: ' + boje + ' | powtórzenia: ' + (ctx.powtorzenia && ctx.powtorzenia.najnowszy
     ? 'najnowszy start (pominięto ' + dropped + ' wcześniejszych)' : 'wszystkie starty');
 }
 
@@ -1432,7 +1461,7 @@ const STALE_COL = 40;
 function writeStaleCheck_(sh, statusCell, action, extraSig) {
   const sig = '=FILTR_ZAWODY&"|"&FILTR_KATEGORIA&"|"&TEXTJOIN(";";FALSE;B_OFICJALNE_BOJE;B_OFICJALNE)'
     + '&"|"&B_TEST_1&"|"&B_TEST_2&"|"&B_TEST_3'
-    + '&"|"&IFERROR(SKRAJNE_ODRZUCAJ&SKRAJNE_METODA&SKRAJNE_PROG;"")&"|"&IFERROR(PODZIAL_KATEGORII;"")&"|"&IFERROR(POWTORZENIA;"")&"|"&IFERROR(TEXTJOIN(";";FALSE;B_ANALIZUJ);"")&"|"&IFERROR(TEXTJOIN(";";FALSE;B_TYP);"")'
+    + '&"|"&IFERROR(SKRAJNE_ODRZUCAJ&SKRAJNE_METODA&SKRAJNE_PROG;"")&"|"&IFERROR(PODZIAL_KATEGORII;"")&"|"&IFERROR(POWTORZENIA;"")&"|"&IFERROR(TEXTJOIN(";";FALSE;B_ANALIZUJ);"")&"|"&IFERROR(TEXTJOIN(";";FALSE;B_TYP);"")&"|"&IFERROR(MIARA;"")'
     + '&"|"&SUM(' + SHEET_WYNIKI + '!J2:J' + MAX_ROWS + ')&"|"&ROUND(SUM(' + SHEET_WYNIKI + '!H2:H' + MAX_ROWS + ');3)'
     + (extraSig || '');
   const C = STALE_COL;

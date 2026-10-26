@@ -105,7 +105,8 @@ const U_ROWS = (() => {
            hbCols: dHead + 19 + KLASY_SYM_GRANICE, hbFirst: dHead + 20 + KLASY_SYM_GRANICE,
            hbLast: dHead + 20 + 2 * KLASY_SYM_GRANICE,
            iHead: dHead + 22 + 2 * KLASY_SYM_GRANICE, iN: dHead + 23 + 2 * KLASY_SYM_GRANICE,
-           iSeed: dHead + 24 + 2 * KLASY_SYM_GRANICE };
+           iSeed: dHead + 24 + 2 * KLASY_SYM_GRANICE,
+           jHead: dHead + 26 + 2 * KLASY_SYM_GRANICE, jMiara: dHead + 27 + 2 * KLASY_SYM_GRANICE };
 })();
 
 /** Adresy komórek w Ustawieniach. */
@@ -129,6 +130,7 @@ const U = {
   klasySymB:      'B' + U_ROWS.hbFirst + ':C' + U_ROWS.hbLast,
   bootN:          'B' + U_ROWS.iN,
   bootSeed:       'B' + U_ROWS.iSeed,
+  miara:          'B' + U_ROWS.jMiara,
   listaZawodow:   'F5:F200',
   listaKategorii: 'G5:G200',
 };
@@ -155,6 +157,7 @@ const NAMED_RANGES = {
   KLASY_SYM_B:      U.klasySymB,
   BOOT_N:           U.bootN,
   BOOT_SEED:        U.bootSeed,
+  MIARA:            U.miara,
 };
 
 // ---------------------------------------------------------------- Menu i Inicjalizacja
@@ -195,6 +198,7 @@ function setupTemplate() {
   const addedAnalizuj = ensureKolumnaAnalizuj_(ss);
   const addedTyp = ensureKolumnaTyp_(ss);
   const addedI = ensureSekcjaBootstrap_(ss);
+  const addedJ = ensureSekcjaMiara_(ss);
   const fixedNames = ensureNamedRanges_(ss);
   applyDaneRules_(ss);
   buildWyniki_(ss);
@@ -211,6 +215,7 @@ function setupTemplate() {
     + (addedAnalizuj ? ' Dodano w Ustawieniach kolumnę „Analizuj” przy bojach (sekcja B).' : '')
     + (addedTyp ? ' Dodano w Ustawieniach kolumnę „Typ” przy bojach (sekcja B).' : '')
     + (addedI ? ' Dodano w Ustawieniach sekcję I (bootstrap).' : '')
+    + (addedJ ? ' Dodano w Ustawieniach sekcję J (miara korelacji).' : '')
     + (fixedNames.length ? ' Naprawiono zakresy nazwane: ' + fixedNames.join(', ') + '.' : '')
     + ' Walidacja Danych zaktualizowana. Zbudowano: ' + SHEET_WYNIKI + '.';
   ss.toast(msg, 'Inicjalizacja zakończona', 6);
@@ -377,6 +382,9 @@ function ensureUstawienia_(ss) {
 
   // I. Bootstrap
   writeSekcjaBootstrap_(sh);
+
+  // J. Miara korelacji
+  writeSekcjaMiara_(sh);
 
   // Szerokości kolumn
   [[1, 170], [2, 110], [3, 110], [4, 70], [5, 110], [6, 190], [7, 220]]
@@ -654,6 +662,38 @@ function writeSekcjaBootstrap_(sh) {
   sh.getRange('C' + R.iSeed).setValue('te same = te same wyniki').setFontStyle('italic').setFontColor(STYLE.noteFont);
   setNamedRange_(ss, 'BOOT_N', sh.getRange(U.bootN));
   setNamedRange_(ss, 'BOOT_SEED', sh.getRange(U.bootSeed));
+}
+
+/** Miary korelacji (sekcja J). [0] = domyślna. */
+const MIARY = ['r Pearsona (wartości)', 'ρ Spearmana (miejsca)'];
+
+/** Sekcja J Ustawień — miara główna korelacji we wszystkich analizach. */
+function writeSekcjaMiara_(sh) {
+  const R = U_ROWS;
+  const ss = sh.getParent();
+  styleSection_(sh.getRange('A' + R.jHead + ':C' + R.jHead), 'J. Miara korelacji');
+  sh.getRange('A' + R.jMiara).setValue('Miara główna').setFontWeight('bold');
+  styleInput_(sh.getRange(U.miara).setValue(MIARY[0]));
+  sh.getRange(U.miara).setDataValidation(SpreadsheetApp.newDataValidation()
+    .requireValueInList(MIARY, true).setAllowInvalid(false).build());
+  sh.getRange('A' + R.jHead).setNote(
+    'Miara korelacji wyniku z wagą w analizach (📊 Analiza): b neutralne, „najbliżej 0”, p i 95% CI, bootstrap, wykres.\n\n'
+    + '• r Pearsona (wartości) — domyślnie: patrzy na wielkość wyników (ile kto podniósł względem wagi). '
+    + 'Bez skoku przy b = 0 — mikroskopijne różnice wyników mają mikroskopijny wpływ. Wrażliwszy na pojedyncze skrajne wyniki (sekcja E)\n'
+    + '• ρ Spearmana (miejsca) — patrzy na kolejność w rankingu. Odporny na skrajne wyniki, ale przy b = 0 remisy (te same odważniki) '
+    + 'dają skok: każde b > 0 rozstrzyga remis na korzyść lżejszego.\n\n'
+    + 'Druga miara jest zawsze pokazywana pomocniczo (szara). Korelacje (analiza łączna) pokazuje obie bez zmian.');
+  sh.getRange('C' + R.jMiara).setValue('wybierz z listy').setFontStyle('italic').setFontColor(STYLE.noteFont);
+  setNamedRange_(ss, 'MIARA', sh.getRange(U.miara));
+}
+
+/** Dopisuje sekcję J do istniejących Ustawień, jeśli jej brak (komórka nagłówka pusta). @return {boolean} */
+function ensureSekcjaMiara_(ss) {
+  const sh = ss.getSheetByName(SHEET_USTAWIENIA);
+  if (!sh || namedRange_(ss, 'MIARA')) return false;
+  if (String(sh.getRange('A' + U_ROWS.jHead).getValue()).trim() !== '') return false;
+  writeSekcjaMiara_(sh);
+  return true;
 }
 
 /** Dopisuje sekcję I do istniejących Ustawień, jeśli jej brak (komórka nagłówka pusta). @return {boolean} */
